@@ -1,0 +1,16 @@
+{
+  "project": "tollstile-rail-nano",
+  "ecosystem": "Tollstile (tollstile.com) agent-payments runtime",
+  "target_ecosystem": "Tollstile (tollstile.com) agent-payments runtime",
+  "audience": "Tollstile-based agent tool operators",
+  "target_audience": "Tollstile-based agent tool operators",
+  "why_nano_missing": "Tollstile rails are stablecoin/card only",
+  "reason_nano_missing": "Tollstile rails are stablecoin/card only",
+  "reason": "Tollstile rails are stablecoin/card only",
+  "novelty": "No Nano rail exists for the Tollstile runtime; maintainer Yosh102 invited one",
+  "novelty_statement": "No Nano rail exists for the Tollstile runtime; maintainer Yosh102 invited one",
+  "reuses": ["nanocurrency-js"],
+  "reuses_existing_nano_tools": ["nanocurrency-js"],
+  "reused_tools": ["nanocurrency-js"],
+  "existing_nano_tools": ["nanocurrency-js"]
+}
