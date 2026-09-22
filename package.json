@@ -6,6 +6,7 @@
   "license": "MIT",
   "author": "PANDeveloper001",
   "keywords": [
+    "tollstile-rail",
     "nano",
     "xno",
     "tollstile",
@@ -18,6 +19,9 @@
     "feeless",
     "rail"
   ],
+  "peerDependencies": {
+    "tollstile": "^0.1.2"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PANDeveloper001/tollstile-rail-nano.git"
@@ -44,9 +48,7 @@
     "test": "vitest run",
     "lint": "echo \"lint: run from the Tollstile repo for these files\""
   },
-  "dependencies": {
-    "tollstile": "^0.1.2"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.18.0",
     "tsx": "4.23.13",
