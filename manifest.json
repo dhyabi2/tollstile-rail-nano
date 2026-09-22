@@ -1,13 +1,14 @@
 {
   "project": "tollstile-rail-nano",
-  "target_ecosystem": "Tollstile (tollstile.com) — an open-source runtime that adds a payment rail to agent tools (402 challenge, settlement, ledger, reconciliation) across HTTP and MCP. Its official rails settle in stablecoins/cards on Base/Solana. It is an agent-payments ecosystem with no Nano support today.",
-  "target_audience": "maintainers and operators of Tollstile-based agent tools and MCP servers who want a second, zero-fee, instant-finality settlement rail beside their stablecoin rail.",
-  "why_nano_missing": "Tollstile's official rails are stablecoin/card-only (Base/Solana USDC); no Nano (XNO) rail exists in its rail ecosystem, so an agent tool on Tollstile cannot settle feeless today.",
-  "novelty": "No Nano rail exists for the Tollstile runtime. This is exactly the integration the Tollstile maintainer (Yosh102, tollstile/Tollstile#44) invited: 'a Nano rail is a natural community rail — a package named tollstile-rail-nano, keyword tollstile-rail, tollstile as a peer dependency, no core changes needed.' It is a thin adapter over existing Nano libraries, never a rebuild of payment internals.",
-  "reuses_existing_nano_tools": [
-    "nanocurrency-js (npm) for Nano address/block primitives and proof-of-work",
-    "rpc.nano.to public Nano RPC (block_info) for on-chain confirmation, reusing the same evidence as the x402 exact-scheme work (block E67FB894...)",
-    "tollstile createRail() framework as the integration surface (the rail itself is a thin adapter over the two Nano primitives above)"
-  ],
-  "deliverable": "A published npm package tollstile-rail-nano (PANDeveloper001 account) that passes the Tollstile railConformance() suite against a fake Nano RPC provider, with README stating pass/skip, then a rail listing issue opened upstream on tollstile/Tollstile."
+  "name": "tollstile-rail-nano",
+  "target": {
+    "ecosystem": "Tollstile (tollstile.com), an open-source runtime that adds a payment rail to agent tools (402 challenge, settlement, ledger, reconciliation) across HTTP and MCP; its official rails settle in stablecoins/cards on Base/Solana.",
+    "audience": "Maintainers and operators of Tollstile-based agent tools and MCP servers who want a second, zero-fee, instant-finality settlement rail beside their stablecoin rail.",
+    "why_missing": "Tollstile's official rails are stablecoin/card-only; no Nano (XNO) rail exists in its rail ecosystem, so an agent tool on Tollstile cannot settle feeless today. The maintainer (Yosh102, tollstile/Tollstile#44) explicitly invited a community rail."
+  },
+  "novelty": "No Nano rail exists for the Tollstile runtime. It is a thin adapter over existing Nano primitives (a payer-presented confirmed send block is the payment, refund by reverse send), never a rebuild of payment internals.",
+  "reuses": [
+    "nanodir-rpc-nano-to",
+    "nanodir-feeless402"
+  ]
 }
