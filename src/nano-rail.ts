@@ -184,8 +184,14 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
   // Fail closed at construction: without a verifier a watcher could replay any
   // confirmed send to the merchant, and refusing at verify would be after the
   // money moved. So the requirement is structural, not a late check.
-  if (options.verifier === undefined) {
-    throw new TollstileError('CONFIG_INVALID', 'nanoRail requires a verifier (NanoSignatureVerifier) to admit real payments (proof-of-possession).');
+  //
+  // Check that it is USABLE, not merely present. The published package is
+  // JavaScript, so the NanoSignatureVerifier type is not enforced at runtime:
+  // `=== undefined` alone let `null` and `{}` through, and the rail then died
+  // with a TypeError inside verify -- after the payer's block had already
+  // confirmed on-chain, which is the exact ordering this check exists to avoid.
+  if (options.verifier === undefined || options.verifier === null || typeof options.verifier.verify !== 'function') {
+    throw new TollstileError('CONFIG_INVALID', 'nanoRail requires a verifier (NanoSignatureVerifier) with a verify() function, to admit real payments (proof-of-possession).');
   }
   const merchant = options.merchantAccount;
   const rpc = options.rpc;

@@ -102,6 +102,21 @@ describe('nano rail', () => {
     expect(settledHashes.length).toBe(1);
   });
 
+  it('fails closed at construction for a verifier that is present but unusable', () => {
+    // The published package is JavaScript, so NanoSignatureVerifier is not
+    // enforced at runtime. A config whose verifier came back null or empty --
+    // from JSON, an env read, a DI container -- must be refused at construction,
+    // not survive to verify time, where the payer's block has already confirmed
+    // on-chain and the operator can only answer a 500 over money that moved.
+    const base = { merchantAccount: MERCHANT, rpc: nanoProvider(MERCHANT), xnoPerUsd: XNO_PER_USD };
+    for (const bad of [undefined, null, {}, 'yes', { verify: 'not a function' }]) {
+      expect(() => nanoRail({ ...base, verifier: bad as never })).toThrowError(/verifier/i);
+    }
+    // A usable verifier still constructs.
+    const provider = nanoProvider(MERCHANT);
+    expect(() => nanoRail({ ...base, rpc: provider, verifier: provider })).not.toThrow();
+  });
+
   it('rejects a proof that points at a block that does not exist', async () => {
     const { provider, enter } = setup();
     const challenge = await enter();
