@@ -29,14 +29,20 @@ tied to the specific purchase to be safe (Tollstile#47 review):
 
 1. **Exact amount per quote.** The quoted price in raw plus a small nonce bound to
    the quote (raw has 30 decimals, so the price occupies the high digits and the
-   nonce the low ones). `verify` accepts only an **exact** match — a donation, an
-   old payment, or a payment for a different quote cannot redeem this one.
+   nonce the low ones). The nonce is a SHA-256 digest of the quote id folded into
+   the low digits; the amount distinguishes quotes within those digits — single-use
+   and the payer signature enforce the binding, not more digits. `verify` accepts
+   only an **exact** match and reads the payable amount from the quote's own offer
+   (it never re-reads the rate), so a rate that moved between quote-time and the
+   paid request cannot refuse a payer who sent exactly what was challenged.
 2. **Proof-of-possession.** The payer signs the quote's nonce with the same Nano
    key that sent the block. `verify` checks the signature against the block's
    source, so a watcher replaying a public block hash is not served.
-3. **Rate is required, not defaulted.** `xnoPerUsd` has no default and is evaluated
-   at quote time (a plain number or a function), so a volatile asset is never
-   underpriced by a stale constant.
+3. **Rate is required, not defaulted, and locked at quote time.** `xnoPerUsd` has
+   no default and is evaluated at quote time (a plain number or a function); the
+   challenged amount never depends on a later rate reading. `verifier` is required
+   and the rail fails closed at construction if it is missing — refusing a payment
+   at verify time would be after the money moved.
 
 The rail declares `quotes: true` and carries the signed quote (nonce + exact
 amount) through its protocol; `verify` returns the quote it was made against and
@@ -51,9 +57,11 @@ npm install
 npm test
 ```
 
-Result: **14 passed, 2 skipped** across the conformance + rail suites. The two
-skips are the lost/failed-settle-response fault cases, which do not apply to a
-push payment rail (the payment has already moved at verification).
+Result: **15 passed** across the rail + conformance suites (7 rail unit tests + 8
+conformance tests). The two fault cases that Tollstile's suite reports as skip for
+a push rail (lost/failed settle response) have nothing to act on: a Nano payment
+has already moved on-chain at verification, so there is no separate settle-time
+capture whose response could be lost.
 
 ## Install
 

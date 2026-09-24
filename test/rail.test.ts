@@ -6,12 +6,20 @@ import { nanoRail } from '../src/nano-rail.js';
 import { NANO_BLOCK_HEADER, NANO_QUOTE_HEADER, NANO_SIGNATURE_HEADER } from '../src/nano-types.js';
 
 const MERCHANT = 'nano_3merchantaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-const XNO_PER_USD = 0.01; // $1 -> 1e28 raw
+const XNO_PER_USD = 0.01; // $1 -> ~1e28 raw
+
+/** Tracks settled blocks the toll records, deduped by reference (core fires
+ * charge.moved more than once for the same settled charge; a single block settles
+ * a single charge, so the reference is the dedupe key — the same reason the rail
+ * must never run a merchant hook from inside verify). */
+let settledHashes: string[] = [];
 
 type Entry = Awaited<ReturnType<ReturnType<typeof setup>['enter']>>;
 
 function setup() {
   const provider = nanoProvider(MERCHANT);
+  settledHashes = [];
+  const seen = new Set<string>();
   const toll = createTollstile({
     rails: [
       nanoRail({
@@ -19,13 +27,21 @@ function setup() {
         rpc: provider,
         signer: provider,
         verifier: provider,
-        // Record each block the rail admits as a settlement in the fake provider.
-        onSettled: (block) => provider.confirmIn(block.hash),
         xnoPerUsd: XNO_PER_USD,
       }),
     ],
     ledger: memoryLedger(),
     secret: 'nano-rail-test-secret-0123456789abcdef',
+    // Record settled blocks from core events, deduped by settlement reference.
+    onEvent: (event) => {
+      if (event.type === 'charge.moved' && event.charge.payment === 'settled') {
+        const ref = event.charge.settlement?.reference;
+        if (ref !== undefined && !seen.has(ref)) {
+          seen.add(ref);
+          settledHashes.push(ref);
+        }
+      }
+    },
   });
   const gate = toll.price('$1', { resource: 'GET /report' });
 
@@ -76,13 +92,14 @@ describe('nano rail', () => {
     expect(accepts.nonce).not.toBe('');
   });
 
-  it('verifies a confirmed send to the merchant, signed by the payer, and settles once', async () => {
+  it('verifies a confirmed send to the merchant, signed by the payer, and settles once via core', async () => {
     const { provider, enter } = setup();
     const paid = await payAndEnter(enter, provider);
     if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
     const completion = await paid.pass.complete('succeeded');
     expect(completion.settlement).toBe('settled');
-    expect(provider.settlements()).toBe(1);
+    // Core recorded exactly one settlement via onEvent (not a merchant-side hook).
+    expect(settledHashes.length).toBe(1);
   });
 
   it('rejects a proof that points at a block that does not exist', async () => {
@@ -94,7 +111,7 @@ describe('nano rail', () => {
     const paid = await forged;
     expect(paid.kind).toBe('denied');
     if (paid.kind === 'denied') expect(paid.denial.error.code).toMatch(/proof_invalid/);
-    expect(provider.settlements()).toBe(0);
+    expect(settledHashes.length).toBe(0);
   });
 
   it('rejects a payment whose signature is wrong (proof-of-possession)', async () => {
@@ -107,7 +124,7 @@ describe('nano rail', () => {
     const badSig = provider.sign('nano_1attacker0000000000000000000000000000000000000000000000', nonce);
     const paid = await enter({ hash, signature: badSig, quote });
     expect(paid.kind).toBe('denied');
-    expect(provider.settlements()).toBe(0);
+    expect(settledHashes.length).toBe(0);
   });
 
   it('rejects a payment for a DIFFERENT amount than the quote (replay of an old block)', async () => {
@@ -120,7 +137,7 @@ describe('nano rail', () => {
     const signature = provider.sign(provider.payerAccount, nonce);
     const paid = await enter({ hash: wrong, signature, quote });
     expect(paid.kind).toBe('denied');
-    expect(provider.settlements()).toBe(0);
+    expect(settledHashes.length).toBe(0);
   });
 
   it('a failed handler refunds by reverse send so the merchant keeps no money', async () => {
@@ -130,15 +147,97 @@ describe('nano rail', () => {
     const completion = await paid.pass.complete('failed');
     expect(completion.settlement).toBe('none');
     expect(provider.refundCount()).toBe(1);
-    // Total accepted settlements net of the refund: the failed charge is refunded.
-    expect(provider.settlements()).toBe(1);
+    // The block was accepted as a settlement at verify (money moved on-chain in a
+    // push-payment rail), then the failed handler triggered a reverse-send refund.
+    // The net effect is zero money kept, confirmed by the refund count.
+    expect(settledHashes.length).toBe(1);
+    expect(provider.refundCount()).toBe(1);
   });
 
-  it('a repeated settle with the same key has no second effect', async () => {
+  it('a repeated settle with the same key has no second effect via core', async () => {
     const { provider, enter } = setup();
     const paid = await payAndEnter(enter, provider);
     if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
     await paid.pass.complete('succeeded');
-    expect(provider.settlements()).toBe(1);
+    expect(settledHashes.length).toBe(1);
+  });
+
+  it('a rate that moves between quote and verify does not refuse a payer who sent the quoted amount', async () => {
+    // Use a moving rate: quote at 0.01, then the rate changes before the paid
+    // request. The rail must still accept a payer who sent exactly the challenged
+    // amount, because the amount is bound to the quote, not recomputed from a
+    // freshly-read rate.
+    const provider = nanoProvider(MERCHANT);
+    settledHashes = [];
+    const seen = new Set<string>();
+    let rate = 0.0100000001;
+    const toll = createTollstile({
+      rails: [
+        nanoRail({
+          merchantAccount: MERCHANT,
+          rpc: provider,
+          signer: provider,
+          verifier: provider,
+          xnoPerUsd: () => rate,
+        }),
+      ],
+      ledger: memoryLedger(),
+      secret: 'nano-rate-test-secret-0123456789abcdef',
+      onEvent: (event) => {
+        if (event.type === 'charge.moved' && event.charge.payment === 'settled') {
+          const ref = event.charge.settlement?.reference;
+          if (ref !== undefined && !seen.has(ref)) {
+            seen.add(ref);
+            settledHashes.push(ref);
+          }
+        }
+      },
+    });
+    const gate = toll.price('$1', { resource: 'GET /report' });
+    const challenge = await gate.enter(httpContext(request(nanoReqHeaders()), { resource: 'GET /report' }));
+    if (challenge.kind !== 'denied') throw new Error('expected a 402');
+    const accepts = acceptsOf(challenge.denial);
+    // Move the rate AFTER the quote and BEFORE the paid request.
+    rate = 0.009; // a swing that would fail an exact-match recompute with the old code
+    const hash = provider.pay(accepts.amountRaw);
+    const signature = provider.sign(provider.payerAccount, accepts.nonce);
+    const paid = await gate.enter(httpContext(requestWith(nanoReqHeaders(), hash, signature, accepts.quote), { resource: 'GET /report' }));
+    if (paid.kind !== 'admitted') throw new Error(`expected admission despite rate move, got ${paid.kind === 'denied' ? paid.denial.error.code : 'unknown'}`);
+    await paid.pass.complete('succeeded');
+    expect(settledHashes.length).toBe(1);
+  });
+
+  it('a replayed proof does not double-record a settlement', async () => {
+    const { provider, enter } = setup();
+    const challenge = await enter();
+    if (challenge.kind !== 'denied') throw new Error('expected a 402');
+    const { amountRaw, nonce, quote } = acceptsOf(challenge.denial);
+    const hash = provider.pay(amountRaw);
+    const signature = provider.sign(provider.payerAccount, nonce);
+    const paid = await enter({ hash, signature, quote });
+    if (paid.kind !== 'admitted') throw new Error('expected admission');
+    await paid.pass.complete('succeeded');
+    expect(settledHashes.length).toBe(1);
+    // Replay the same proof: core denies on the single-use check and the rail has
+    // no merchant hook inside verify, so the settlement reference is recorded once.
+    const replay = await enter({ hash, signature, quote });
+    if (replay.kind !== 'denied') throw new Error('a replayed proof must be denied');
+    expect(settledHashes.length).toBe(1);
   });
 });
+
+function nanoReqHeaders() {
+  return {};
+}
+
+function request(headers: Record<string, string>) {
+  return new Request('https://example.test/report', { headers });
+}
+
+function requestWith(headers: Record<string, string>, hash: string, signature: string, quote: string) {
+  const h = { ...headers };
+  h[NANO_BLOCK_HEADER] = hash;
+  h[NANO_SIGNATURE_HEADER] = signature;
+  h[NANO_QUOTE_HEADER] = quote;
+  return new Request('https://example.test/report', { headers: h });
+}

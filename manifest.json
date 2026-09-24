@@ -10,5 +10,6 @@
   "reuses": [
     "nanodir-rpc-nano-to",
     "nanodir-feeless402"
-  ]
+  ],
+  "reuse_note": "'reuses' names the Nano building-block primitives this rail wraps (an RPC read and a feeless settlement pattern from the nanodirectory index), not runtime npm dependencies: the published package is dependency-free at runtime, importing only 'tollstile' (peer) and 'node:crypto'."
 }

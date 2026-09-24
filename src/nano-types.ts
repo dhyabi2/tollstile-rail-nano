@@ -75,17 +75,11 @@ export type NanoRailOptions = {
   readonly signer?: NanoSigner;
   /**
    * Bind the presented block to its presenter: the payer signs the per-quote nonce
-   * with the Nano source key and the rail verifies it. Required for real money —
-   * without it any confirmed send to the merchant could be replayed by a watcher.
+   * with the Nano source key and the rail verifies it. REQUIRED (the constructor
+   * fails closed if omitted): without it any confirmed send to the merchant could
+   * be replayed by a watcher, and refusing at verify would be after the money moved.
    */
-  readonly verifier?: NanoSignatureVerifier;
-  /**
-   * Optional merchant-side receipt hook, called once the rail verifies a confirmed
-   * payment for the merchant (money already moved on-chain at verify time). The
-   * merchant appends to their own ledger here. Defaults to doing nothing; never a
-   * test-only hook reached from production code.
-   */
-  readonly onSettled?: (block: { hash: string; source: string; destination: string; amountRaw: string }) => void;
+  readonly verifier: NanoSignatureVerifier;
   /**
    * How many XNO one US dollar is worth, evaluated at quote time. REQUIRED: a rail
    * must never assume a default rate, or a static constant silently undercharges
