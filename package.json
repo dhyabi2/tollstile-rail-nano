@@ -1,6 +1,6 @@
 {
   "name": "tollstile-rail-nano",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A Nano (XNO) settlement rail for Tollstile: instance-fast, feeless, peer-to-peer machine payments. An upfront push-payment rail where a payer-presented confirmed Nano send block is the payment (paid at verification); refunds for failed handlers are reverse sends.",
   "type": "module",
   "license": "MIT",

@@ -7,16 +7,21 @@
  *   - the merchant "records" a received block once the rail verifies it valid
  *     (`settlements()` counts exactly these accepted blocks, so a tampered proof
  *     never settles);
- *   - the merchant's signer can refund a settled payment by a reverse `send`.
+ *   - the merchant's signer can refund a settled payment by a reverse `send`;
+ *   - the payer can sign the quote nonce and the rail verifies it, binding the
+ *     presented block to its presenter (proof-of-possession, Tollstile#47).
  *
  * It is deliberately small: it models the rail's contract, not the full Nano DAG.
- * A real deployment replaces `blockInfo` with rpc.nano.to and `sendFor` with the
- * operator's own Nano signing key.
+ * A real deployment replaces `blockInfo` with rpc.nano.to, `sendFor` with the
+ * operator's own Nano signing key, and the signature verifier with Nano's ED25519
+ * verification over the account's public key.
  */
-import type { NanoBlockInfo, NanoRpcRead, NanoSigner } from './nano-types.js';
+import { createHash } from 'node:crypto';
+import type { NanoBlockInfo, NanoRpcRead, NanoSigner, NanoSignatureVerifier } from './nano-types.js';
 
 export type NanoProvider = NanoRpcRead &
-  NanoSigner & {
+  NanoSigner &
+  NanoSignatureVerifier & {
     /** The public account the payer draws from when creating a send. */
     readonly payerAccount: string;
     /** Confirmed send blocks the merchant accepted; the suite counts these. */
@@ -27,6 +32,8 @@ export type NanoProvider = NanoRpcRead &
     refundCount(): number;
     /** Have the payer send `amountRaw` to the merchant; returns the block hash. */
     pay(amountRaw: string): string;
+    /** Sign `message` with the given account's fake Nano key; returns the signature (hex). */
+    sign(account: string, message: string): string;
   };
 
 let seq = 0;
@@ -34,6 +41,22 @@ let seq = 0;
 function hashFor(prefix: string): string {
   const n = `0000000000000000000000000000000000000000000000000000000000000000${String(seq++).padStart(6, '0')}`;
   return `${prefix}${n.slice(-32)}`;
+}
+
+/** Deterministic ED25519 keypair per Nano account string, so signing/verify are coherent. */
+function keypairOf(account: string) {
+  const seed = createHash('sha256').update(`tollstile-nano-fake:${account}`).digest('hex').slice(0, 64);
+  // We can't hand a raw 32-byte seed to createSign with a DER key; derive a full
+  // key by using the seed to build a node:crypto Sign/Verify pair via a key object.
+  // Simplest faithful approach: store the seed, and sign by replaying it. Node's
+  // ed25519 needs a KeyObject; we derive one deterministically is not exposed, so
+  // we emulate with HMAC-seeded signatures accepted by our own fake verifier.
+  return { seed };
+}
+
+function fakeSign(account: string, message: string): string {
+  const { seed } = keypairOf(account);
+  return `${seed}:${createHash('sha256').update(`${account}::${message}`).digest('hex')}`;
 }
 
 export function nanoProvider(merchantAccount: string): NanoProvider {
@@ -64,6 +87,14 @@ export function nanoProvider(merchantAccount: string): NanoProvider {
       const { hash } = confirmedSend(merchantAccount, destination, amountRaw);
       refunds += 1;
       return Promise.resolve(hash);
+    },
+
+    verify(account: string, message: string, signature: string): boolean {
+      return fakeSign(account, message) === signature;
+    },
+
+    sign(account: string, message: string): string {
+      return fakeSign(account, message);
     },
 
     confirmIn(hash: string): void {

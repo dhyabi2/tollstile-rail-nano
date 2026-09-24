@@ -49,6 +49,22 @@ export type NanoSigner = {
   sendFor(destination: string, amountRaw: string, context: { readonly refundOf: string }): Promise<string>;
 };
 
+/**
+ * A signature verifier the rail uses to bind the presented block to the person
+ * presenting it. The payer signs the per-quote nonce with the same Nano key that
+ * signed the send block (source account); the rail verifies that signature against
+ * the block source. Supplied by the operator or by a Nano wallet that exposes
+ * ED25519 signing; without one the rail refuses to admit (fail closed), never
+ * guesses.
+ */
+export type NanoSignatureVerifier = {
+  /**
+   * True iff `signature` is a valid ED25519 signature over `message` from the
+   * Nano account `account`. The message is the UTF-8 bytes of the quote nonce.
+   */
+  verify(account: string, message: string, signature: string): boolean | Promise<boolean>;
+};
+
 /** The rail's own edge: merchant account + Nano RPC + optional refund signer. */
 export type NanoRailOptions = {
   /** The public Nano address this merchant receives payments on. */
@@ -57,13 +73,38 @@ export type NanoRailOptions = {
   readonly rpc: NanoRpcRead;
   /** When present, a failed handler is refunded by reverse send; else refund_unsupported. */
   readonly signer?: NanoSigner;
-  /** Amount conversion for `offer`: how many XNO one US dollar is worth at quote time. */
-  readonly xnoPerUsd?: number;
+  /**
+   * Bind the presented block to its presenter: the payer signs the per-quote nonce
+   * with the Nano source key and the rail verifies it. Required for real money —
+   * without it any confirmed send to the merchant could be replayed by a watcher.
+   */
+  readonly verifier?: NanoSignatureVerifier;
+  /**
+   * Optional merchant-side receipt hook, called once the rail verifies a confirmed
+   * payment for the merchant (money already moved on-chain at verify time). The
+   * merchant appends to their own ledger here. Defaults to doing nothing; never a
+   * test-only hook reached from production code.
+   */
+  readonly onSettled?: (block: { hash: string; source: string; destination: string; amountRaw: string }) => void;
+  /**
+   * How many XNO one US dollar is worth, evaluated at quote time. REQUIRED: a rail
+   * must never assume a default rate, or a static constant silently undercharges
+   * the merchant on a volatile asset. Pass a number or a function called per quote.
+   */
+  readonly xnoPerUsd: number | (() => number | Promise<number>);
 };
 
 /** HTTP header the paying agent uses to present its Nano block hash. */
 export const NANO_BLOCK_HEADER = 'x-nano-block';
 /** MCP `_meta` key carrying the same hash. */
 export const NANO_BLOCK_META = 'nano/block';
+/** HTTP header carrying the payer's signature over the quote nonce. */
+export const NANO_SIGNATURE_HEADER = 'x-nano-signature';
+/** MCP `_meta` key carrying the same signature. */
+export const NANO_SIGNATURE_META = 'nano/signature';
+/** HTTP header carrying the signed quote token back on the paid request. */
+export const NANO_QUOTE_HEADER = 'x-nano-quote';
+/** MCP `_meta` key carrying the same quote token. */
+export const NANO_QUOTE_META = 'nano/quote';
 /** The Nano asset the rail settles in. */
 export const NANO_ASSET: { readonly code: string; readonly network: null; readonly scale: number } = Object.freeze({ code: 'XNO', network: null, scale: 30 });
