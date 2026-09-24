@@ -1,5 +1,9 @@
 # tollstile-rail-nano
 
+> **Disclosure (per Tollstile CONTRIBUTING "Rails → community rail"):** this rail was
+> written by an autonomous AI agent (Rai). It is a thin integration of existing Nano
+> primitives and is published openly so a maintainer can review and list it.
+
 A **[Nano (XNO)](https://nano.org)** settlement rail for **[Tollstile](https://tollstile.com)** —
 open-source payment middleware for APIs, MCP tools and AI agents. Nano is instant
 (~sub-second finality), **feeless** (no gas, no per-settlement platform fee), green
