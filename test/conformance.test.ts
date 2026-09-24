@@ -2,10 +2,11 @@ import { describe, it } from 'vitest';
 import { fakeClock, railConformance, type RailHarness } from 'tollstile/testing';
 import { nanoProvider } from '../src/nano-provider.js';
 import { nanoRail } from '../src/nano-rail.js';
-import { NANO_BLOCK_HEADER } from '../src/nano-types.js';
+import { NANO_BLOCK_HEADER, NANO_QUOTE_TOKEN_HEADER } from '../src/nano-types.js';
 
 const MERCHANT = 'nano_3merchantaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-const XNO_PER_USD = 0.01; // 1 XNO = $100; $1 -> 0.01 XNO -> 1e28 raw
+// A rate function, called per quote so a volatile asset is priced fresh (required, no default).
+const rate = () => 0.01; // 1 XNO = $100; $1 -> 0.01 XNO -> 1e28 raw
 
 /**
  * Drives the Nano rail against the fake network. Because a Nano payment has already
@@ -17,23 +18,42 @@ const XNO_PER_USD = 0.01; // 1 XNO = $100; $1 -> 0.01 XNO -> 1e28 raw
  */
 function harness(): RailHarness {
   const provider = nanoProvider(MERCHANT);
-  const rail = nanoRail({ merchantAccount: MERCHANT, rpc: provider, signer: provider, xnoPerUsd: XNO_PER_USD });
+  const rail = nanoRail({
+    merchantAccount: MERCHANT,
+    rpc: provider,
+    rate,
+    onSettled: (hash) => provider.confirmIn(hash),
+    signer: provider,
+  });
   return {
     rail,
     clock: fakeClock(),
     price: '$1',
-    // A fresh payment per call: the payer sends the quoted raw amount to the merchant.
+    // A fresh payment per call: the payer sends the exact quoted raw amount (price base
+    // plus the per-quote nonce) and presents the quote token it is paying.
     pay: ({ offer, url }) => {
-      const accepts = offer.challenge.accepts as { amountRaw: string };
+      const accepts = offer.challenge.accepts as { amountRaw: string; quoteToken: string };
       const hash = provider.pay(accepts.amountRaw);
-      return Promise.resolve(new Request(url, { headers: { [NANO_BLOCK_HEADER]: hash } }));
+      return Promise.resolve(
+        new Request(url, {
+          headers: {
+            [NANO_BLOCK_HEADER]: hash,
+            [NANO_QUOTE_TOKEN_HEADER]: accepts.quoteToken,
+          },
+        }),
+      );
     },
     settlements: () => provider.settlements(),
-    // Point the request at a block that was never created: the rail must reject it
-    // and the provider must have no accepted settlement.
+    // Point the request at a block that was never created and keep the (valid) quote:
+    // the rail must reject the forged block and the provider must have no accepted settlement.
     tamper: (request) =>
       new Request(request.url, {
-        headers: { [NANO_BLOCK_HEADER]: 'fail_00000000000000000000000000000000forged' },
+        headers: {
+          [NANO_BLOCK_HEADER]: 'fail_00000000000000000000000000000000forged',
+          ...(request.headers.has(NANO_QUOTE_TOKEN_HEADER)
+            ? { [NANO_QUOTE_TOKEN_HEADER]: request.headers.get(NANO_QUOTE_TOKEN_HEADER) as string }
+            : {}),
+        },
       }),
   };
 }

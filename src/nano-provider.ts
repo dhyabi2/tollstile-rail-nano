@@ -21,7 +21,7 @@ export type NanoProvider = NanoRpcRead &
     readonly payerAccount: string;
     /** Confirmed send blocks the merchant accepted; the suite counts these. */
     settlements(): number;
-    /** The merchant recorded a confirmed block it received (called by the rail on valid verify). */
+    /** The merchant recorded a confirmed block it received (wired to the rail's onSettled). */
     confirmIn(hash: string): void;
     /** How many reverse-send refunds the merchant has issued. */
     refundCount(): number;
@@ -60,7 +60,7 @@ export function nanoProvider(merchantAccount: string): NanoProvider {
       return Promise.resolve(blocks.get(hash));
     },
 
-    sendFor(destination: string, amountRaw: string): Promise<string> {
+    sendFor(destination: string, amountRaw: string, _context?: { readonly refundOf: string }): Promise<string> {
       const { hash } = confirmedSend(merchantAccount, destination, amountRaw);
       refunds += 1;
       return Promise.resolve(hash);

@@ -49,21 +49,49 @@ export type NanoSigner = {
   sendFor(destination: string, amountRaw: string, context: { readonly refundOf: string }): Promise<string>;
 };
 
+/**
+ * How many XNO one unit of the price currency (USD micros) is worth at quote time.
+ * A plain number is a fixed rate; a function is evaluated for every quote, so a
+ * volatile asset is priced fresh each time it is offered. Required: a merchant must
+ * set it, and there is no silent default. Returns XNO per 1 of the price currency
+ * (e.g. a rate of 0.01 with a USD price means $1 -> 0.01 XNO).
+ */
+export type XnoRate = number | ((micros: bigint) => number | Promise<number>);
+
 /** The rail's own edge: merchant account + Nano RPC + optional refund signer. */
 export type NanoRailOptions = {
   /** The public Nano address this merchant receives payments on. */
   readonly merchantAccount: string;
   /** Read the Nano ledger (rpc.nano.to in production, a fake in tests). */
   readonly rpc: NanoRpcRead;
+  /**
+   * XNO price of one unit of the price currency, evaluated at quote time. Required:
+   * a volatile asset must not fall back to a hard-coded number (Tollstile rails refuse
+   * to assume a conversion; pass a rate — ideally a function — not a default).
+   */
+  readonly rate: XnoRate;
+  /**
+   * When present, the merchant records a received block the instant the rail verifies a
+   * payment for it (the settled leg of a push payment). A production deployment supplies a
+   * wallet/reconciler that notes the received Nano send; the test provider counts it. This is a
+   * declared merchant callback, not a test hook: a real merchant's account observation.
+   */
+  readonly onSettled?: (hash: string) => void | Promise<void>;
   /** When present, a failed handler is refunded by reverse send; else refund_unsupported. */
   readonly signer?: NanoSigner;
-  /** Amount conversion for `offer`: how many XNO one US dollar is worth at quote time. */
-  readonly xnoPerUsd?: number;
 };
 
 /** HTTP header the paying agent uses to present its Nano block hash. */
 export const NANO_BLOCK_HEADER = 'x-nano-block';
-/** MCP `_meta` key carrying the same hash. */
+/** HTTP header the paying agent uses to present the quote token it is paying. */
+export const NANO_QUOTE_TOKEN_HEADER = 'x-nano-quote-token';
+/** MCP `_meta` key carrying the same block hash. */
 export const NANO_BLOCK_META = 'nano/block';
+/** MCP `_meta` key carrying the same quote token. */
+export const NANO_QUOTE_TOKEN_META = 'nano/quote-token';
 /** The Nano asset the rail settles in. */
-export const NANO_ASSET: { readonly code: string; readonly network: null; readonly scale: number } = Object.freeze({ code: 'XNO', network: null, scale: 30 });
+export const NANO_ASSET: { readonly code: string; readonly network: null; readonly scale: number } = Object.freeze({
+  code: 'XNO',
+  network: null,
+  scale: 30,
+});
