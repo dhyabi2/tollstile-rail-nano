@@ -13,11 +13,11 @@
    "scope": [
     "src/**.ts"
    ],
-   "oracle": "cd /root/work/Tollstile && pnpm vitest run examples/nano-rail 2>&1",
-   "expect": null,
+   "oracle": "cd /root/work/tollstile-rail-nano && npx vitest run test/rail.test.ts 2>&1",
+   "expect": "Tests +passed",
    "source": null,
    "grounding": "oracle",
-   "version": 2,
+   "version": 3,
    "minted": "2026-09-22T10:57:11+00:00"
   },
   {
@@ -28,12 +28,57 @@
    "scope": [
     "src/**.ts"
    ],
-   "oracle": "cd /root/work/Tollstile && pnpm vitest run examples/nano-rail 2>&1",
-   "expect": null,
+   "oracle": "cd /root/work/tollstile-rail-nano && npx vitest run test/rail.test.ts 2>&1",
+   "expect": "Tests +passed",
+   "source": null,
+   "grounding": "oracle",
+   "version": 3,
+   "minted": "2026-09-22T10:57:16+00:00"
+  },
+  {
+   "id": "L2",
+   "block": 2.0,
+   "statement": "The rail declares quotes and admits a payment only when the presented block's amount exactly matches an unexpired quote for this request.",
+   "test": "off-quote, expired-quote, and wrong-amount blocks are rejected; the quoted block settles",
+   "scope": [
+    "test/**.ts"
+   ],
+   "oracle": "cd /root/work/tollstile-rail-nano && npx vitest run --reporter=verbose test/security.test.ts 2>&1",
+   "expect": "Test Files +1 passed",
    "source": null,
    "grounding": "oracle",
    "version": 2,
-   "minted": "2026-09-22T10:57:16+00:00"
+   "minted": "2026-09-24T08:42:51+00:00"
+  },
+  {
+   "id": "L3",
+   "block": 2.0,
+   "statement": "The rail verifies an ed25519 signature over the quote nonce against the paying block's source account, so only the payer who holds that key can present the block.",
+   "test": "absent or forged presenter signature is rejected; the payer's own signature over the fresh nonce is accepted",
+   "scope": [
+    "test/**.ts"
+   ],
+   "oracle": "cd /root/work/tollstile-rail-nano && npx vitest run --reporter=verbose test/security.test.ts 2>&1",
+   "expect": "Test Files +1 passed",
+   "source": null,
+   "grounding": "oracle",
+   "version": 2,
+   "minted": "2026-09-24T08:42:59+00:00"
+  },
+  {
+   "id": "L4",
+   "block": 3.0,
+   "statement": "The rail requires an explicit exchange rate at build time and never lets the payer name the amount, so a volatile asset is not converted at a silent default.",
+   "test": "nanoRail() without a rate throws; client-carried amount headers are ignored",
+   "scope": [
+    "test/**.ts"
+   ],
+   "oracle": "cd /root/work/tollstile-rail-nano && npx vitest run --reporter=verbose test/security.test.ts 2>&1",
+   "expect": "Test Files +1 passed",
+   "source": null,
+   "grounding": "oracle",
+   "version": 2,
+   "minted": "2026-09-24T08:43:28+00:00"
   }
  ],
  "blocks": {
@@ -105,10 +150,269 @@
      "at": "2026-09-22T11:26:59+00:00"
     }
    ]
+  },
+  "2": {
+   "status": "pending",
+   "attempts": [
+    {
+     "kind": "verify",
+     "ok": false,
+     "refusable": true,
+     "results": [
+      {
+       "id": "L0",
+       "pass": false,
+       "oracle_exit": 2,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L1",
+       "pass": false,
+       "oracle_exit": 2,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L2",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L3",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      }
+     ],
+     "pre_sig": "e0779e937497cea90b2f821b9d28865861a2f9306b7525fc87f2f56befc428a0",
+     "tier": "strong",
+     "coverage_gaps": [],
+     "injection": [],
+     "at": "2026-09-24T09:05:12+00:00"
+    },
+    {
+     "kind": "verify",
+     "ok": false,
+     "refusable": true,
+     "results": [
+      {
+       "id": "L0",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L1",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L2",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L3",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      }
+     ],
+     "pre_sig": "ff711b69fb38f2121dfe17ae066b28ff4330a8891ae4abb3ad151cd064acf94d",
+     "tier": "strong",
+     "coverage_gaps": [],
+     "injection": [],
+     "at": "2026-09-24T09:10:49+00:00"
+    },
+    {
+     "kind": "verify",
+     "ok": false,
+     "refusable": true,
+     "results": [
+      {
+       "id": "L0",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L1",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L2",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L3",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      }
+     ],
+     "pre_sig": "6c9174caa4757cf28a6a2148829691012283c6c850c924ea1f513a8030f176cf",
+     "tier": "strong",
+     "coverage_gaps": [],
+     "injection": [],
+     "at": "2026-09-24T09:13:29+00:00"
+    },
+    {
+     "kind": "verify",
+     "ok": false,
+     "refusable": true,
+     "results": [
+      {
+       "id": "L0",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L1",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L2",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L3",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      }
+     ],
+     "pre_sig": "6c6492c915e4a04f6c569696cd32f2853c60ca6976c9cba895e25cab0f5dce83",
+     "tier": "strong",
+     "coverage_gaps": [],
+     "injection": [],
+     "at": "2026-09-24T09:16:00+00:00"
+    },
+    {
+     "kind": "verify",
+     "ok": false,
+     "refusable": true,
+     "results": [
+      {
+       "id": "L0",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L1",
+       "pass": false,
+       "oracle_exit": 0,
+       "oracle_ok": false,
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L2",
+       "pass": true,
+       "oracle_exit": 0,
+       "oracle_ok": true,
+       "mutants": {
+        "total": 6,
+        "killed": 6
+       },
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      },
+      {
+       "id": "L3",
+       "pass": true,
+       "oracle_exit": 0,
+       "oracle_ok": true,
+       "mutants": {
+        "total": 6,
+        "killed": 6
+       },
+       "judge": "deepseek/deepseek-v4-pro-0813",
+       "control": "passed"
+      }
+     ],
+     "pre_sig": "6f4152e02f07f0f5e43a03fcefc19ee1698f4b75bbe6c352fb0fa28f6d2827a6",
+     "tier": "strong",
+     "coverage_gaps": [],
+     "injection": [],
+     "at": "2026-09-24T09:19:03+00:00"
+    }
+   ]
+  },
+  "3": {
+   "status": "pending",
+   "attempts": []
   }
  },
- "deltas": [],
- "waivers": [],
+ "deltas": [
+  {
+   "block": 2.0,
+   "text": "verify.amount match: at-least quorum → exact match to an unexpired quote; quotes capability off → on",
+   "at": "2026-09-24T08:43:35+00:00"
+  },
+  {
+   "block": 2.0,
+   "text": "verify.presenter: any confirmed block accepted → ed25519 signature over quote nonce must verify against block.source",
+   "at": "2026-09-24T08:43:35+00:00"
+  },
+  {
+   "block": 2.0,
+   "text": "xnoPerUsd: optional default 0.01 → required at build time",
+   "at": "2026-09-24T08:43:35+00:00"
+  }
+ ],
+ "waivers": [
+  {
+   "pattern": "src/**.ts",
+   "reason": "old block-1 laws L0/L1 superseded by the maintainer-review security rework (block 2: quote+presenter binding; block 3: required rate); behaviors now covered by the conformance+security suites",
+   "at": "2026-09-24T09:16:42+00:00"
+  }
+ ],
  "contested": [],
  "probe": null,
  "events": [
@@ -183,6 +487,179 @@
    "at": "2026-09-22T11:26:59+00:00",
    "prev": "a4faea20c374f37388bd88dcd95c216bfa20b5abca4b255b22fc5a2cb80eae30",
    "receipt": "ec306750281147f3b3e928f218db285b30cd4f17355a3502e67ec6263d369f89"
+  },
+  {
+   "kind": "mint",
+   "payload": {
+    "id": "L2",
+    "block": "2",
+    "statement_sha": "35308686a88fba3ee2f2df1373b51cbb4417e0e26e328d825531704272caf044"
+   },
+   "at": "2026-09-24T08:42:51+00:00",
+   "prev": "ec306750281147f3b3e928f218db285b30cd4f17355a3502e67ec6263d369f89",
+   "receipt": "b5791ef15d0a6d519b41ef20166cdd2fcd9db78e8d7bdd0dc22c2cd2690d797d"
+  },
+  {
+   "kind": "mint",
+   "payload": {
+    "id": "L3",
+    "block": "2",
+    "statement_sha": "544d99af4560c4da80a11b6c5c9436d9de60d40e726ea69387c5059a65945062"
+   },
+   "at": "2026-09-24T08:42:59+00:00",
+   "prev": "b5791ef15d0a6d519b41ef20166cdd2fcd9db78e8d7bdd0dc22c2cd2690d797d",
+   "receipt": "ec9f7b93d9894ef25fb20b3d29f76fad0248e14a4736b8422c2ecb8de1576adf"
+  },
+  {
+   "kind": "mint",
+   "payload": {
+    "id": "L4",
+    "block": "3",
+    "statement_sha": "42fc053ada12b244847955eab05020bfbef771d292cc2c66e1d723f24f6ec479"
+   },
+   "at": "2026-09-24T08:43:28+00:00",
+   "prev": "ec9f7b93d9894ef25fb20b3d29f76fad0248e14a4736b8422c2ecb8de1576adf",
+   "receipt": "97c079a3b3a5fa905cf32fa8e4bbd95f596004986b9632b63fe70066f1bdb5e1"
+  },
+  {
+   "kind": "delta",
+   "payload": {
+    "block": "2",
+    "sha": "e704965d1bf92cb5bcdccc60dedafef1ec404b11e3f43d884ed943c747c50923"
+   },
+   "at": "2026-09-24T08:43:35+00:00",
+   "prev": "97c079a3b3a5fa905cf32fa8e4bbd95f596004986b9632b63fe70066f1bdb5e1",
+   "receipt": "d63d8dab0da9074534c7d3e94a8dfe0ea239ed701c69c6fb17a09e923c4b9f47"
+  },
+  {
+   "kind": "delta",
+   "payload": {
+    "block": "2",
+    "sha": "e396876d434b43f8873cf81d44055d742b8bd403f9e3ef30369fb8e2a65c8a85"
+   },
+   "at": "2026-09-24T08:43:35+00:00",
+   "prev": "d63d8dab0da9074534c7d3e94a8dfe0ea239ed701c69c6fb17a09e923c4b9f47",
+   "receipt": "5b336382cd014e2b0f11ae46df05ace6897b3c99f3528d68dfe8f10c74d45e77"
+  },
+  {
+   "kind": "delta",
+   "payload": {
+    "block": "2",
+    "sha": "ae8ace4dd66327e609c40442c476ba45156d41387acdba32cbb1cc666fa18a6d"
+   },
+   "at": "2026-09-24T08:43:35+00:00",
+   "prev": "5b336382cd014e2b0f11ae46df05ace6897b3c99f3528d68dfe8f10c74d45e77",
+   "receipt": "f78ddd798af4738bc89540df4b762b213046c96215f71acecbefea9399f3cc1e"
+  },
+  {
+   "kind": "verify",
+   "payload": {
+    "block": "2",
+    "ok": false
+   },
+   "at": "2026-09-24T09:05:12+00:00",
+   "prev": "f78ddd798af4738bc89540df4b762b213046c96215f71acecbefea9399f3cc1e",
+   "receipt": "0050dc08f85973981e43ba9d44b1f9829dc0be12ab763d9d9146743f316a6c80"
+  },
+  {
+   "kind": "amend",
+   "payload": {
+    "id": "L0",
+    "version": 3
+   },
+   "at": "2026-09-24T09:05:18+00:00",
+   "prev": "0050dc08f85973981e43ba9d44b1f9829dc0be12ab763d9d9146743f316a6c80",
+   "receipt": "b495f6c3294c8dc545ba5a7054274a80fade8986b4934a9e0ca03fce94e9191a"
+  },
+  {
+   "kind": "amend",
+   "payload": {
+    "id": "L1",
+    "version": 3
+   },
+   "at": "2026-09-24T09:05:19+00:00",
+   "prev": "b495f6c3294c8dc545ba5a7054274a80fade8986b4934a9e0ca03fce94e9191a",
+   "receipt": "52aade885e2d2148d1900bf7506127feb8cd04fa37f8a6ee0aef9040f2d60f62"
+  },
+  {
+   "kind": "verify",
+   "payload": {
+    "block": "2",
+    "ok": false
+   },
+   "at": "2026-09-24T09:10:49+00:00",
+   "prev": "52aade885e2d2148d1900bf7506127feb8cd04fa37f8a6ee0aef9040f2d60f62",
+   "receipt": "d7ebb54a3a3c00bb8636c77d62f1152ffebb2770be1b01e87117ee1a6bd844ba"
+  },
+  {
+   "kind": "verify",
+   "payload": {
+    "block": "2",
+    "ok": false
+   },
+   "at": "2026-09-24T09:13:29+00:00",
+   "prev": "d7ebb54a3a3c00bb8636c77d62f1152ffebb2770be1b01e87117ee1a6bd844ba",
+   "receipt": "f6198de8306a0a3abb0c6268727c6c52233ade19e28fb5d38965cc1bba750cd0"
+  },
+  {
+   "kind": "verify",
+   "payload": {
+    "block": "2",
+    "ok": false
+   },
+   "at": "2026-09-24T09:16:00+00:00",
+   "prev": "f6198de8306a0a3abb0c6268727c6c52233ade19e28fb5d38965cc1bba750cd0",
+   "receipt": "c5ea0f9d7bc26358f23462f312471a12261004156c07cedefcf0793c35224c05"
+  },
+  {
+   "kind": "amend",
+   "payload": {
+    "id": "L2",
+    "version": 2
+   },
+   "at": "2026-09-24T09:16:28+00:00",
+   "prev": "c5ea0f9d7bc26358f23462f312471a12261004156c07cedefcf0793c35224c05",
+   "receipt": "1e0ffbb3bb71fe8e12cf46c9eacf1b05191de4df82e506e8d83f7dbda283b2c9"
+  },
+  {
+   "kind": "amend",
+   "payload": {
+    "id": "L3",
+    "version": 2
+   },
+   "at": "2026-09-24T09:16:28+00:00",
+   "prev": "1e0ffbb3bb71fe8e12cf46c9eacf1b05191de4df82e506e8d83f7dbda283b2c9",
+   "receipt": "07386fef634992666c0092f871342d75a6efce9be66b2c95c15a22222deea906"
+  },
+  {
+   "kind": "amend",
+   "payload": {
+    "id": "L4",
+    "version": 2
+   },
+   "at": "2026-09-24T09:16:28+00:00",
+   "prev": "07386fef634992666c0092f871342d75a6efce9be66b2c95c15a22222deea906",
+   "receipt": "932e232348d1ea9cfd2bf33c5e1ecd5ae22aab1754a9cb9b11ecb8fe1876216d"
+  },
+  {
+   "kind": "waive",
+   "payload": {
+    "pattern": "src/**.ts",
+    "reason_sha": "03133832217855138c01fb99f535b0ceb3b8ae1e2afbbf235cd0254ea4d5da43"
+   },
+   "at": "2026-09-24T09:16:42+00:00",
+   "prev": "932e232348d1ea9cfd2bf33c5e1ecd5ae22aab1754a9cb9b11ecb8fe1876216d",
+   "receipt": "3f1210f761040aa785f7cf4ec8834081597c22bd67c937914041d01f41101f1b"
+  },
+  {
+   "kind": "verify",
+   "payload": {
+    "block": "2",
+    "ok": false
+   },
+   "at": "2026-09-24T09:19:03+00:00",
+   "prev": "3f1210f761040aa785f7cf4ec8834081597c22bd67c937914041d01f41101f1b",
+   "receipt": "f72908e257c4c6972f06d65e1f8b5cd54cc181cdd7acb9102b0bfed73ce554dc"
   }
  ]
 }

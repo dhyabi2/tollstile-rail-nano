@@ -37,6 +37,28 @@ export type NanoBlockInfo = {
  */
 export type NanoRpcRead = {
   blockInfo(hash: string): Promise<NanoBlockInfo | undefined>;
+  /**
+   * Verify that `signature` (64-byte hex, ed25519) validly signs the UTF-8 bytes
+   * of `message` with the private key corresponding to `account` (a nano_ address).
+   * When the provider cannot answer (unavailable, timeout) it MUST throw.
+   * When the answer is "no, this is not valid", return `false`.
+   * The rail MUST NOT trade on an undefined/absent method; if `verifySignature` is
+   * not supplied the rail treats every signature-presenting request as invalid.
+   */
+  readonly verifySignature?: (
+    message: string,
+    signature: string,
+    account: string,
+  ) => Promise<boolean>;
+  /**
+   * Record that the merchant accepted a confirmed block as a receipt. This is how
+   * the operator's Nano read path confirms the value was received (e.g. by a
+   * `pending`/received-block check on rpc.nano.to, or a local wallet receipt). It
+   * is optional: a rail whose operator does not record receipts locally simply
+   * omits it (the settlement is still reported from `verify`). The fake provider
+   * implements it so the conformance suite can count accepted settlements.
+   */
+  readonly recordReceived?: (hash: string) => void;
 };
 
 /**
@@ -57,13 +79,21 @@ export type NanoRailOptions = {
   readonly rpc: NanoRpcRead;
   /** When present, a failed handler is refunded by reverse send; else refund_unsupported. */
   readonly signer?: NanoSigner;
-  /** Amount conversion for `offer`: how many XNO one US dollar is worth at quote time. */
-  readonly xnoPerUsd?: number;
+  /** Amount conversion for `offer`: how many XNO one US dollar is worth at quote time. REQUIRED: no silent default. */
+  readonly xnoPerUsd: number;
 };
 
 /** HTTP header the paying agent uses to present its Nano block hash. */
 export const NANO_BLOCK_HEADER = 'x-nano-block';
-/** MCP `_meta` key carrying the same hash. */
+/** HTTP header carrying the payer's ed25519 signature over the quote nonce. */
+export const NANO_SIGNATURE_HEADER = 'x-nano-signature';
+/** HTTP header carrying the quote token so the rail can open it and verify freshness. */
+export const NANO_QUOTE_HEADER = 'x-nano-quote';
+/** MCP `_meta` key carrying the same block hash. */
 export const NANO_BLOCK_META = 'nano/block';
+/** MCP `_meta` key carrying the signature. */
+export const NANO_SIGNATURE_META = 'nano/signature';
+/** MCP `_meta` key carrying the quote token. */
+export const NANO_QUOTE_META = 'nano/quote';
 /** The Nano asset the rail settles in. */
 export const NANO_ASSET: { readonly code: string; readonly network: null; readonly scale: number } = Object.freeze({ code: 'XNO', network: null, scale: 30 });
