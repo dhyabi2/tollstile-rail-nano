@@ -1,5 +1,6 @@
 import { createTollstile, memoryLedger } from 'tollstile';
 import { httpContext } from 'tollstile/testing';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { nanoProvider } from '../src/nano-provider.js';
 import { nanoRail } from '../src/nano-rail.js';
@@ -238,6 +239,28 @@ describe('nano rail', () => {
     const replay = await enter({ hash, signature, quote });
     if (replay.kind !== 'denied') throw new Error('a replayed proof must be denied');
     expect(settledHashes.length).toBe(1);
+  });
+
+  it('the conformance result the README publishes is the result this suite produces', () => {
+    // The README tells a Tollstile maintainer to run `npm test` and compare
+    // against a printed number, so that number is a claim about this suite and
+    // goes stale every time a case is added -- it has now been wrong twice, at
+    // 15 and at 17. Counting the cases here means the suite that changes is the
+    // suite that reports the mismatch. This test counts itself.
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    const countIts = (file: string): number =>
+      (readFileSync(new URL(file, import.meta.url), 'utf8').match(/^\s*it\(/gm) ?? []).length;
+
+    const rail = countIts('./rail.test.ts');
+    const conformance = countIts('./conformance.test.ts');
+
+    const claim = /\*\*(\d+) passed\*\*[^(]*\((\d+) rail unit tests \+ (\d+)\s*\n?\s*conformance tests\)/.exec(readme);
+    expect(claim, 'the README no longer states a conformance result in the expected shape').not.toBeNull();
+    const [, total, claimedRail, claimedConformance] = claim!;
+
+    expect(Number(claimedRail), 'README rail unit test count').toBe(rail);
+    expect(Number(claimedConformance), 'README conformance test count').toBe(conformance);
+    expect(Number(total), 'README total').toBe(rail + conformance);
   });
 });
 
