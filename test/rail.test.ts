@@ -241,6 +241,40 @@ describe('nano rail', () => {
     expect(settledHashes.length).toBe(1);
   });
 
+  it('the README install snippet constructs a Tollstile that can price', () => {
+    // The Install snippet is the only code a new user runs, and it ships inside
+    // the npm tarball (`files: ["dist", "README.md"]`). `nanoRail` declares
+    // `livemode: true`, and core refuses a live rail that has no quote secret:
+    //   TollstileError CONFIG_INVALID
+    //   "Live rails need `secret` to sign quotes."
+    // so a snippet that omits `secret` throws on the user's very first line,
+    // before any Nano code runs. Every test in this repository passes a secret,
+    // which is why the suite never noticed. This law builds the instance the
+    // README describes and passes `secret` only when the snippet does, so the
+    // README itself decides whether the construction succeeds.
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    const snippet = /```ts\n([\s\S]*?createTollstile[\s\S]*?)```/.exec(readme);
+    expect(snippet, 'the README no longer carries a ```ts install snippet').not.toBeNull();
+    const code = snippet![1];
+
+    const provider = nanoProvider(MERCHANT);
+    const secret = /^\s*secret:/m.test(code) ? 'readme-install-snippet-secret-0123456789' : undefined;
+    const toll = createTollstile({
+      rails: [
+        nanoRail({
+          merchantAccount: MERCHANT,
+          rpc: provider,
+          signer: provider,
+          verifier: provider,
+          xnoPerUsd: XNO_PER_USD,
+        }),
+      ],
+      ledger: memoryLedger(),
+      secret,
+    });
+    expect(typeof toll.price('$1', { resource: 'readme-install' }).enter).toBe('function');
+  });
+
   it('the conformance result the README publishes is the result this suite produces', () => {
     // The README tells a Tollstile maintainer to run `npm test` and compare
     // against a printed number, so that number is a claim about this suite and

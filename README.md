@@ -61,7 +61,7 @@ npm install
 npm test
 ```
 
-Result: **19 passed** across the rail + conformance suites (11 rail unit tests + 8
+Result: **20 passed** across the rail + conformance suites (12 rail unit tests + 8
 conformance tests). The two fault cases that Tollstile's suite reports as skip for
 a push rail (lost/failed settle response) have nothing to act on: a Nano payment
 has already moved on-chain at verification, so there is no separate settle-time
@@ -83,6 +83,11 @@ const toll = createTollstile({
     xnoPerUsd: () => fetchXnoUsdRate(),
   })],
   ledger: memoryLedger(),
+  // Required: `nanoRail` is a live rail, and core signs quotes with this. Core
+  // throws CONFIG_INVALID without it ("Live rails need `secret` to sign
+  // quotes"), so the snippet does not run if you leave it out. At least 32
+  // random characters, from your secret store -- never a literal in your source.
+  secret: process.env.TOLLSTILE_SECRET!,
 });
 ```
 
