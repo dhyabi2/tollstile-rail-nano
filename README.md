@@ -61,7 +61,7 @@ npm install
 npm test
 ```
 
-Result: **21 passed** across the rail + conformance suites (13 rail unit tests + 8
+Result: **24 passed** across the rail + conformance suites (16 rail unit tests + 8
 conformance tests). The two fault cases that Tollstile's suite reports as skip for
 a push rail (lost/failed settle response) have nothing to act on: a Nano payment
 has already moved on-chain at verification, so there is no separate settle-time
