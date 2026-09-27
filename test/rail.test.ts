@@ -1,14 +1,22 @@
-import { createTollstile, memoryLedger } from 'tollstile';
-import { httpContext } from 'tollstile/testing';
+import { createTollstile, memoryLedger, TollstileError } from 'tollstile';
+import { httpContext, mcpContext, railConformance } from 'tollstile/testing';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { nanoProvider } from '../src/nano-provider.js';
-import { nanoRail } from '../src/nano-rail.js';
+import { nanoRail, parseRate, toRaw } from '../src/nano-rail.js';
+import { harness } from './harness.js';
 import type { NanoBlockInfo } from '../src/nano-types.js';
-import { NANO_BLOCK_HEADER, NANO_QUOTE_HEADER, NANO_SIGNATURE_HEADER } from '../src/nano-types.js';
+import {
+  NANO_BLOCK_HEADER,
+  NANO_BLOCK_META,
+  NANO_QUOTE_HEADER,
+  NANO_QUOTE_META,
+  NANO_SIGNATURE_HEADER,
+  NANO_SIGNATURE_META,
+} from '../src/nano-types.js';
 
 const MERCHANT = 'nano_3merchantaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-const XNO_PER_USD = 0.01; // $1 -> ~1e28 raw
+const XNO_PER_USD = '0.01'; // $1 -> 1e28 raw
 
 /** Tracks settled blocks the toll records, deduped by reference (core fires
  * charge.moved more than once for the same settled charge; a single block settles
@@ -16,26 +24,30 @@ const XNO_PER_USD = 0.01; // $1 -> ~1e28 raw
  * must never run a merchant hook from inside verify). */
 let settledHashes: string[] = [];
 
+type TollstileEvent = Parameters<NonNullable<Parameters<typeof createTollstile>[0]['onEvent']>>[0];
 type Entry = Awaited<ReturnType<ReturnType<typeof setup>['enter']>>;
 
 function setup() {
   const provider = nanoProvider(MERCHANT);
   settledHashes = [];
   const seen = new Set<string>();
+  const rail = nanoRail({
+    merchantAccount: MERCHANT,
+    rpc: provider,
+    signer: provider,
+    verifier: provider,
+    xnoPerUsd: XNO_PER_USD,
+  });
+  const ledger = memoryLedger();
+  /** Every core event, in order, with NO deduplication. */
+  const events: TollstileEvent[] = [];
   const toll = createTollstile({
-    rails: [
-      nanoRail({
-        merchantAccount: MERCHANT,
-        rpc: provider,
-        signer: provider,
-        verifier: provider,
-        xnoPerUsd: XNO_PER_USD,
-      }),
-    ],
-    ledger: memoryLedger(),
+    rails: [rail],
+    ledger,
     secret: 'nano-rail-test-secret-0123456789abcdef',
     // Record settled blocks from core events, deduped by settlement reference.
     onEvent: (event) => {
+      events.push(event);
       if (event.type === 'charge.moved' && event.charge.payment === 'settled') {
         const ref = event.charge.settlement?.reference;
         if (ref !== undefined && !seen.has(ref)) {
@@ -55,9 +67,12 @@ function setup() {
     if (p?.quote !== undefined) headers[NANO_QUOTE_HEADER] = p.quote;
     return new Request('https://example.test/report', { headers });
   };
-  const enter = (p?: { hash?: string; signature?: string; quote?: string }) =>
-    gate.enter(httpContext(request(p), { resource: 'GET /report' }));
-  return { provider, toll, gate, enter };
+  const enter = (p?: { hash?: string; signature?: string; quote?: string; key?: string }) => {
+    const r = request(p);
+    if (p?.key !== undefined) r.headers.set('idempotency-key', p.key);
+    return gate.enter(httpContext(r, { resource: 'GET /report' }));
+  };
+  return { provider, toll, gate, enter, rail, ledger, events };
 }
 
 function acceptsOf(denial: unknown): { amountRaw: string; to: string; nonce: string; quote: string } {
@@ -206,7 +221,7 @@ describe('nano rail', () => {
           signer: provider,
           xnoPerUsd: XNO_PER_USD,
           // Answers for ANY hash, so the block shape is the only thing under test.
-          rpc: { blockInfo: (h: string) => Promise.resolve(block(payable, provider.payerAccount)) },
+          rpc: { blockInfo: (_h: string) => Promise.resolve(block(payable, provider.payerAccount)) },
         }),
       ],
       ledger: memoryLedger(),
@@ -242,7 +257,7 @@ describe('nano rail', () => {
   it('rejects a block that is not a send (a receive presented as a payment)', async () => {
     const paid = await guardCase((payable, payer) => ({
       hash: 'h', confirmed: true, source: payer, destination: MERCHANT,
-      amountRaw: payable, subtype: 'receive' as NanoBlockInfo['subtype'],
+      amountRaw: payable, subtype: 'receive',
     }));
     expect(paid.kind).toBe('denied');
     if (paid.kind === 'denied') expect(paid.denial.error.code).toMatch(/proof_invalid/);
@@ -281,11 +296,23 @@ describe('nano rail', () => {
     expect(provider.refundCount()).toBe(1);
   });
 
-  it('a repeated settle with the same key has no second effect via core', async () => {
-    const { provider, enter } = setup();
+  it('a repeated settle with the same key has no second effect', async () => {
+    // Actually repeat it: call the rail's settle a second time with the recorded
+    // authorization and the same operation key, as a crashed worker would.
+    const { provider, enter, rail, ledger } = setup();
     const paid = await payAndEnter(enter, provider);
     if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
     await paid.pass.complete('succeeded');
+    const [charge] = ledger.charges();
+    const authorization = ledger.authorizations().find((a) => a.id === charge.authorizationId)!;
+    const op = { key: `${charge.id}:settle`, signal: new AbortController().signal };
+    const first = await rail.settle(authorization as never, charge, op);
+    const second = await rail.settle(authorization as never, charge, op);
+    expect(first).toEqual(second);
+    expect(second.status === 'settled' ? second.reference : null).toBe(charge.settlement?.reference);
+    // No new block moved: no refund, no second transfer, one charge in the ledger.
+    expect(provider.refundCount()).toBe(0);
+    expect(ledger.charges().length).toBe(1);
     expect(settledHashes.length).toBe(1);
   });
 
@@ -334,22 +361,151 @@ describe('nano rail', () => {
     expect(settledHashes.length).toBe(1);
   });
 
-  it('a replayed proof does not double-record a settlement', async () => {
-    const { provider, enter } = setup();
-    const challenge = await enter();
+  it('under replay and retry, core books the payment exactly once (counted raw, no dedupe)', async () => {
+    // The review's point 2: core calls rail.verify BEFORE its single-use check, so
+    // anything inside verify runs again on a replayed block hash or an
+    // Idempotency-Key retry. The rail therefore has no hook there; merchants book
+    // from core's onEvent. This counts those events RAW -- no Set -- across a
+    // first payment, a replay of the same proof, and two retries with the same
+    // Idempotency-Key, and counts how often verify accepted the block meanwhile.
+    const { provider, rail } = setup();
+    let verifiedValid = 0;
+    const counted: typeof rail = {
+      ...rail,
+      async verify(context, terms, operation) {
+        const result = await rail.verify(context, terms, operation);
+        if (result.status === 'valid') verifiedValid += 1;
+        return result;
+      },
+    };
+    const events: TollstileEvent[] = [];
+    const toll = createTollstile({
+      rails: [counted],
+      ledger: memoryLedger(),
+      secret: 'nano-rail-replay-secret-0123456789abcdef',
+      onEvent: (event) => events.push(event),
+    });
+    const gate = toll.price('$1', { resource: 'GET /report' });
+    const go = (p?: { hash: string; signature: string; quote: string }, key?: string) => {
+      const r = p === undefined ? request({}) : requestWith({}, p.hash, p.signature, p.quote);
+      if (key !== undefined) r.headers.set('idempotency-key', key);
+      return gate.enter(httpContext(r, { resource: 'GET /report' }));
+    };
+
+    const challenge = await go();
     if (challenge.kind !== 'denied') throw new Error('expected a 402');
     const { amountRaw, nonce, quote } = acceptsOf(challenge.denial);
-    const hash = provider.pay(amountRaw);
-    const signature = provider.sign(provider.payerAccount, nonce);
-    const paid = await enter({ hash, signature, quote });
+    const proof = { hash: provider.pay(amountRaw), signature: provider.sign(provider.payerAccount, nonce), quote };
+
+    const paid = await go(proof, 'key-1');
     if (paid.kind !== 'admitted') throw new Error('expected admission');
     await paid.pass.complete('succeeded');
-    expect(settledHashes.length).toBe(1);
-    // Replay the same proof: core denies on the single-use check and the rail has
-    // no merchant hook inside verify, so the settlement reference is recorded once.
-    const replay = await enter({ hash, signature, quote });
-    if (replay.kind !== 'denied') throw new Error('a replayed proof must be denied');
-    expect(settledHashes.length).toBe(1);
+
+    const replay = await go(proof);
+    const retry1 = await go(proof, 'key-1');
+    const retry2 = await go(proof, 'key-1');
+    // Nothing after the first request is admitted as a new payment.
+    for (const later of [replay, retry1, retry2]) expect(later.kind).not.toBe('admitted');
+
+    // verify DID run again for every later request (this is what made an
+    // in-verify hook double-book) ...
+    expect(verifiedValid).toBe(4);
+    // ... but core opened the authorization once and settled one charge once.
+    const opened = events.filter((e) => e.type === 'authorization.opened' && e.created);
+    expect(opened.length).toBe(1);
+    const settledCharges = new Set(
+      events.flatMap((e) => (e.type === 'charge.moved' && e.charge.payment === 'settled' ? [e.charge.id] : [])),
+    );
+    expect(settledCharges.size).toBe(1);
+    expect(provider.refundCount()).toBe(0);
+  });
+
+  it('refuses the removed onSettled hook at construction, pointing at onEvent', () => {
+    const provider = nanoProvider(MERCHANT);
+    const make = () =>
+      nanoRail({
+        merchantAccount: MERCHANT,
+        rpc: provider,
+        verifier: provider,
+        xnoPerUsd: XNO_PER_USD,
+        onSettled: () => undefined,
+      } as never);
+    expect(make).toThrowError(TollstileError);
+    expect(make).toThrowError(/onEvent/);
+  });
+
+  it('takes the rate as an exact decimal string', () => {
+    // $1 at "0.0123" XNO/USD is exactly 0.0123 XNO = 1.23e28 raw.
+    expect(toRaw(1_000_000n, parseRate('0.0123'))).toBe('12300000000000000000000000000');
+    expect(toRaw(1_000_000n, parseRate('0.0123'))).toBe(toRaw(1_000_000n, parseRate('0.012300')));
+    // A number is read through its decimal form: 0.0123 and "0.0123" agree.
+    expect(toRaw(1_000_000n, parseRate(0.0123))).toBe(toRaw(1_000_000n, parseRate('0.0123')));
+  });
+
+  it('a rate with an exponent or float noise neither throws a SyntaxError nor breaks the price/nonce layout', () => {
+    // 1e-7 stringifies with an exponent; BigInt("1e-7") would throw SyntaxError.
+    expect(toRaw(1_000_000n, parseRate(1e-7))).toBe(toRaw(1_000_000n, parseRate('0.0000001')));
+    expect(toRaw(1_000_000n, parseRate(2e21))).toBe(toRaw(1_000_000n, parseRate('2000000000000000000000')));
+    // 0.1 + 0.2 carries 17 significant digits; the price must still leave the
+    // low 10 digits clear for the nonce.
+    for (const rate of [0.1 + 0.2, 1 / 3, '0.333333333333333333333333333333333', 1e-7]) {
+      const raw = BigInt(toRaw(1_000_000n, parseRate(rate)));
+      expect(raw > 0n).toBe(true);
+      expect(raw % 10_000_000_000n).toBe(0n);
+    }
+    // Rates that cannot be a price are a configuration error, never a SyntaxError.
+    for (const bad of ['1e-7', '-0.01', '0', '0.000', 'abc', '', ' ', '0x10', 0, -1, Number.NaN, Infinity, null, {}]) {
+      expect(() => parseRate(bad), JSON.stringify(bad) ?? typeof bad).toThrowError(TollstileError);
+    }
+  });
+
+  it('a noisy float rate still pays end to end: challenged amount = price with clear low digits + nonce', async () => {
+    const provider = nanoProvider(MERCHANT);
+    const toll = createTollstile({
+      rails: [nanoRail({ merchantAccount: MERCHANT, rpc: provider, verifier: provider, xnoPerUsd: 0.1 + 0.2 })],
+      ledger: memoryLedger(),
+      secret: 'nano-rail-float-secret-0123456789abcdef',
+    });
+    const gate = toll.price('$1', { resource: 'GET /report' });
+    const challenge = await gate.enter(httpContext(request({}), { resource: 'GET /report' }));
+    if (challenge.kind !== 'denied') throw new Error('expected a 402');
+    const offer = (challenge.denial as unknown as { offers: { offer: { amount: string } }[] }).offers[0].offer;
+    expect(BigInt(offer.amount) % 10_000_000_000n).toBe(0n);
+    const { amountRaw, nonce, quote } = acceptsOf(challenge.denial);
+    const hash = provider.pay(amountRaw);
+    const paid = await gate.enter(
+      httpContext(requestWith({}, hash, provider.sign(provider.payerAccount, nonce), quote), { resource: 'GET /report' }),
+    );
+    expect(paid.kind).toBe('admitted');
+  });
+
+  it('pays over MCP through _meta (block, signature and quote)', async () => {
+    const provider = nanoProvider(MERCHANT);
+    const toll = createTollstile({
+      rails: [nanoRail({ merchantAccount: MERCHANT, rpc: provider, verifier: provider, xnoPerUsd: XNO_PER_USD })],
+      ledger: memoryLedger(),
+      secret: 'nano-rail-mcp-secret-0123456789abcdef',
+    });
+    const gate = toll.price('$1', { resource: 'tool:report' });
+    const unpaid = await gate.enter(mcpContext('report', {}));
+    if (unpaid.kind !== 'denied') throw new Error('expected a payment-required answer');
+    const { amountRaw, nonce, quote } = acceptsOf(unpaid.denial);
+    expect(quote).not.toBe('');
+    const hash = provider.pay(amountRaw);
+    const signature = provider.sign(provider.payerAccount, nonce);
+
+    // Wrong signature over MCP is refused, exactly as over HTTP.
+    const forged = await gate.enter(mcpContext('report', { [NANO_BLOCK_META]: hash, [NANO_SIGNATURE_META]: 'nope', [NANO_QUOTE_META]: quote }));
+    expect(forged.kind).toBe('denied');
+    // No quote in _meta: refused as quote_invalid, not admitted on the block alone.
+    const noQuote = await gate.enter(mcpContext('report', { [NANO_BLOCK_META]: hash, [NANO_SIGNATURE_META]: signature }));
+    expect(noQuote.kind).toBe('denied');
+
+    const paid = await gate.enter(mcpContext('report', { [NANO_BLOCK_META]: hash, [NANO_SIGNATURE_META]: signature, [NANO_QUOTE_META]: quote }));
+    if (paid.kind !== 'admitted') throw new Error(`expected admission over MCP, got ${paid.denial.error.code}`);
+    const completion = await paid.pass.complete('succeeded');
+    expect(completion.settlement).toBe('settled');
+    expect(completion.receipt.headers[0]).toEqual([NANO_BLOCK_HEADER, hash]);
   });
 
   it('the README install snippet constructs a Tollstile that can price', () => {
@@ -397,15 +553,17 @@ describe('nano rail', () => {
       (readFileSync(new URL(file, import.meta.url), 'utf8').match(/^\s*it\(/gm) ?? []).length;
 
     const rail = countIts('./rail.test.ts');
-    const conformance = countIts('./conformance.test.ts');
+    const cases = railConformance(harness);
+    const skipped = cases.filter((c) => c.skip !== undefined).length;
+    const conformance = cases.length - skipped;
 
-    const claim = /\*\*(\d+) passed\*\*[^(]*\((\d+) rail unit tests \+ (\d+)\s*\n?\s*conformance tests\)/.exec(readme);
+    const claim = /Tollstile conformance: \*\*(\d+) passed, (\d+) skipped\*\*[\s\S]*?Rail unit tests: \*\*(\d+) passed\*\*/.exec(readme);
     expect(claim, 'the README no longer states a conformance result in the expected shape').not.toBeNull();
-    const [, total, claimedRail, claimedConformance] = claim!;
+    const [, claimedConformance, claimedSkipped, claimedRail] = claim!;
 
+    expect(Number(claimedConformance), 'README conformance passed').toBe(conformance);
+    expect(Number(claimedSkipped), 'README conformance skipped').toBe(skipped);
     expect(Number(claimedRail), 'README rail unit test count').toBe(rail);
-    expect(Number(claimedConformance), 'README conformance test count').toBe(conformance);
-    expect(Number(total), 'README total').toBe(rail + conformance);
   });
 });
 

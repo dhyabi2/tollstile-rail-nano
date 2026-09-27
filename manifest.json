@@ -7,9 +7,10 @@
     "why_missing": "Tollstile's official rails are stablecoin/card-only; no Nano (XNO) rail exists in its rail ecosystem, so an agent tool on Tollstile cannot settle feeless today. The maintainer (Yosh102, tollstile/Tollstile#44) explicitly invited a community rail."
   },
   "novelty": "No Nano rail exists for the Tollstile runtime. It is a thin adapter over existing Nano primitives (a payer-presented confirmed send block is the payment, refund by reverse send), never a rebuild of payment internals.",
-  "reuses": [
+  "reuses": [],
+  "design_references": [
     "nanodir-rpc-nano-to",
     "nanodir-feeless402"
   ],
-  "reuse_note": "'reuses' names the Nano building-block primitives this rail wraps (an RPC read and a feeless settlement pattern from the nanodirectory index), not runtime npm dependencies: the published package is dependency-free at runtime, importing only 'tollstile' (peer) and 'node:crypto'."
+  "design_note": "The rail has no runtime dependencies (it imports only 'tollstile' as a peer and 'node:crypto'). The two entries above are the Nano patterns it was designed from (an RPC block_info read, and a payer-presented feeless send as the payment), not packages it uses."
 }

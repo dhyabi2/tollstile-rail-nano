@@ -29,43 +29,86 @@ a deliberate choice, not a bug — make sure it is what your terms say.
 ## Proof is bound to the purchase and its payer
 
 Because Nano blocks are public and have no memo field, a payment proof must be
-tied to the specific purchase to be safe (Tollstile#47 review):
+tied to the specific purchase to be safe (Tollstile#47 and #49 reviews):
 
-1. **Exact amount per quote.** The quoted price in raw plus a small nonce bound to
-   the quote (raw has 30 decimals, so the price occupies the high digits and the
-   nonce the low ones). The nonce is a SHA-256 digest of the quote id folded into
-   the low digits; the amount distinguishes quotes within those digits — single-use
-   and the payer signature enforce the binding, not more digits. `verify` accepts
-   only an **exact** match and reads the payable amount from the quote's own offer
-   (it never re-reads the rate), so a rate that moved between quote-time and the
-   paid request cannot refuse a payer who sent exactly what was challenged.
+1. **Exact amount per quote.** The payable amount is the quoted price in raw plus
+   a per-quote nonce. The price is rounded down to a multiple of 10^10 raw
+   (under 1e-20 XNO) so it occupies the high digits, and the nonce — SHA-256 of
+   the quote id, reduced below 10^10 — the low 10 digits. **That nonce is ~33
+   bits: it makes two quotes' amounts differ with high probability, not with
+   certainty.** It is not what makes a proof safe. `verify` accepts only an
+   **exact** match, and reads the payable amount from the nano offer the quote
+   itself carries — it never calls the rate — so a rate that moved between the
+   402 and the paid request cannot refuse a payer who sent exactly what was
+   challenged.
 2. **Proof-of-possession.** The payer signs the quote's nonce with the same Nano
    key that sent the block. `verify` checks the signature against the block's
    source, so a watcher replaying a public block hash is not served.
-3. **Rate is required, not defaulted, and locked at quote time.** `xnoPerUsd` has
-   no default and is evaluated at quote time (a plain number or a function); the
-   challenged amount never depends on a later rate reading. `verifier` is required
-   and the rail fails closed at construction if it is missing — refusing a payment
-   at verify time would be after the money moved.
+3. **Single use.** Core records the block hash as the proof id; a block that
+   already paid for one request is refused for any other. Together with (2), this
+   is the binding; the amount in (1) only makes a stray or old send unlikely to
+   fit a new quote. A stronger amount-level binding would be a per-quote derived
+   receiving account, not more digits.
 
-The rail declares `quotes: true` and carries the signed quote (nonce + exact
-amount) through its protocol; `verify` returns the quote it was made against and
-the block must arrive within the quote's expiry.
+`verifier` is **required**: `nanoRail()` throws `CONFIG_INVALID` at construction
+when it is missing or unusable, because refusing at verify time would be after the
+payer's XNO moved. There is no other check in `verify` that can fail after
+payment for a configuration reason.
 
-## Conformance
+## Rate
 
-Run against the published `tollstile` package:
+`xnoPerUsd` is required and has no default. Pass a **decimal string** (`"0.0123"`)
+for an exact rate, or a function returning one, called once per quote. A number is
+accepted and read through its decimal form (so `1e-7` works and float noise such
+as `0.30000000000000004` cannot spill into the nonce digits). A sign, an exponent
+inside a string, zero or non-numeric text is `CONFIG_INVALID`, never a
+`SyntaxError`.
+
+## Booking payments: use core's `onEvent`
+
+The rail has no merchant callback. (`onSettled` ran inside `verify`, and core
+calls `verify` before its single-use check, so a replayed block or an
+`Idempotency-Key` retry fired it again; passing it now throws at construction.)
+Book payments from core's events, which fire once, after the ledger has decided:
+
+```js
+createTollstile({
+  rails: [nanoRail({ /* ... */ })],
+  onEvent(event) {
+    if (event.type === 'authorization.opened' && event.created) book(event.authorization);
+    // or: event.type === 'charge.moved' && event.charge.payment === 'settled'
+  },
+  // ...
+});
+```
+
+The rail's data per authorization is the payer's block hash, source, destination,
+amount and quote id; `redact` drops the payer's signature once the charge is final.
+
+## Tests
 
 ```
 npm install
 npm test
+npm run lint
 ```
 
-Result: **24 passed** across the rail + conformance suites (16 rail unit tests + 8
-conformance tests). The two fault cases that Tollstile's suite reports as skip for
-a push rail (lost/failed settle response) have nothing to act on: a Nano payment
-has already moved on-chain at verification, so there is no separate settle-time
-capture whose response could be lost.
+Tollstile conformance: **7 passed, 2 skipped** — Tollstile's own
+`railConformance` from `tollstile/testing`, unmodified, against the fake network.
+The two skipped cases are the settle-time fault cases (lost settlement response,
+failure before any effect): a Nano payment has already moved on-chain at
+verification, so there is no settle-time capture for them to act on.
+
+Rail unit tests: **21 passed**, including a rate that moves between quote and
+verify, core's events counted raw under replay and `Idempotency-Key` retries,
+a settle actually repeated with the same key, the MCP `_meta` path, and rates given
+as strings, exponents and noisy floats.
+
+**Test-network status:** not yet run end to end on a Nano test network. The
+public Test Network endpoints listed in Nano's docs (`test.nano.org`) do not
+resolve as of 2026-09-27, and the Beta network's faucet is a Discord channel;
+`examples/rpc-network-check.mjs` checks the read path (`block_info`) against the
+live network, read-only.
 
 ## Install
 
@@ -79,8 +122,8 @@ const toll = createTollstile({
     rpc: { blockInfo: (h) => /* your Nano RPC read */ },
     signer: { sendFor: (dest, raw, ctx) => /* your signer (for refunds) */ },
     verifier: { verify: (acc, msg, sig) => /* verify an ED25519 Nano signature */ },
-    // Required, and evaluated at quote time if you pass a function:
-    xnoPerUsd: () => fetchXnoUsdRate(),
+    // Required. A decimal string is exact; a function is called once per quote:
+    xnoPerUsd: () => fetchXnoUsdRate(), // e.g. returns "0.0123"
   })],
   ledger: memoryLedger(),
   // Required: `nanoRail` is a live rail, and core signs quotes with this. Core

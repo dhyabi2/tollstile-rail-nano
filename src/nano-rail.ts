@@ -39,36 +39,83 @@ export type NanoData = {
 const ZERO = 0n;
 /**
  * Number of low-order raw digits the per-quote nonce occupies. A $1 Nano payment
- * is ~1e28 raw (10^28), so the low 10 digits leave the high 20 for the price and
- * still bind the amount to the quote. The nonce is a SHA-256 digest folded into
- * these digits; single-use is enforced by the quote and the block hash in core,
- * and proof-of-possession by the payer's signature over the nonce.
+ * is ~1e28 raw, so the price keeps the high ~18 digits and the nonce the low 10.
+ * The price is rounded DOWN to a multiple of 10^NONCE_DIGITS raw (at most
+ * 1e-20 XNO) so the two never overlap, whatever the precision of the rate.
  */
 const NONCE_DIGITS = 10n;
+const NONCE_MODULUS = 10n ** NONCE_DIGITS;
+/** XNO has 30 decimals; the price is in USD micros (6), so raw = micros * rate * 10^24. */
+const MICROS_TO_RAW_SCALE = 24;
+/** A plain non-negative decimal: digits, optionally a point and more digits. No sign, no exponent. */
+const DECIMAL = /^(\d+)(?:\.(\d+))?$/;
 
-/** The merchant's live XNO-per-USD rate, required at quote time. */
-async function currentRate(rate: NanoRailOptions['xnoPerUsd']): Promise<number> {
-  const value = typeof rate === 'function' ? await rate() : rate;
-  if (!(typeof value === 'number') || !Number.isFinite(value) || value <= 0) {
-    throw new TollstileError('CONFIG_INVALID', 'xnoPerUsd must be a positive number or a function returning one.');
+type Decimal = { readonly digits: bigint; readonly decimals: number };
+
+/**
+ * Parse the merchant's XNO-per-USD rate as an exact decimal.
+ *
+ * Pass a decimal STRING ("0.0123") for an exact rate. A number is accepted for
+ * convenience and read through `String(n)`, expanding an exponent ("1e-7"), so it
+ * never reaches `BigInt()` as text it cannot parse. Anything else, zero, a sign or
+ * a non-finite number is a configuration error, never a SyntaxError from inside
+ * the quote.
+ */
+export function parseRate(value: unknown): Decimal {
+  let text: string;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) throw rateError();
+    text = expandExponent(String(value));
+  } else if (typeof value === 'string') {
+    text = value.trim();
+  } else {
+    throw rateError();
   }
-  return value;
+  const match = DECIMAL.exec(text);
+  if (match === null) throw rateError();
+  const fraction = (match[2] ?? '').replace(/0+$/, '');
+  const digits = BigInt(`${match[1]}${fraction}`);
+  if (digits <= ZERO) throw rateError();
+  return { digits, decimals: fraction.length };
+}
+
+function rateError(): TollstileError {
+  return new TollstileError(
+    'CONFIG_INVALID',
+    'xnoPerUsd must be a positive decimal string (e.g. "0.0123"), a positive finite number, or a function returning one.',
+  );
+}
+
+/** "1.5e-7" -> "0.00000015"; "2e+21" -> "2000000000000000000000". Text without an exponent is returned as is. */
+function expandExponent(text: string): string {
+  const match = /^(\d+)(?:\.(\d+))?e([+-]?\d+)$/i.exec(text);
+  if (match === null) return text;
+  const whole = match[1];
+  const fraction = match[2] ?? '';
+  const exponent = Number(match[3]);
+  const digits = `${whole}${fraction}`;
+  const point = whole.length + exponent;
+  if (point <= 0) return `0.${'0'.repeat(-point)}${digits}`;
+  if (point >= digits.length) return `${digits}${'0'.repeat(point - digits.length)}`;
+  return `${digits.slice(0, point)}.${digits.slice(point)}`;
+}
+
+/** The merchant's XNO-per-USD rate, read ONCE, at quote time. `verify` never calls this. */
+async function currentRate(rate: NanoRailOptions['xnoPerUsd']): Promise<Decimal> {
+  return parseRate(typeof rate === 'function' ? await rate() : rate);
 }
 
 /**
- * A < 10^NONCE_DIGITS integer bound to the quote, used to make each quote's
- * payable amount unique. SHA-256 of `quote.id` gives ~32 bytes of entropy; the
- * low NONCE_DIGITS digits are what we keep. The exact price and the 32-bit claim
- * are separated from this: the amount distinguishes quotes within the digits we
- * keep, and single-use (quote) + signature (proof-of-possession) enforce the rest.
+ * The per-quote nonce: the SHA-256 digest of `quote.id`, reduced below
+ * 10^NONCE_DIGITS. That is ~33 bits, and it is all the amount can carry: it makes
+ * two quotes' payable amounts differ with probability ~1 - 2^-33, NOT with
+ * certainty. The binding does not rest on it: a block hash is single-use in core's
+ * ledger, and the payer must sign this quote's nonce with the key that sent the
+ * block. The amount only makes a stray or old send unlikely to fit a new quote.
  */
 function nonceIntOf(quote: Quote): bigint {
   const digest = createHash('sha256').update(quote.id).digest();
-  // Low NONCE_DIGITS bytes of the digest, as a bigint, folded below 10^NONCE_DIGITS.
-  const bytes = digest.subarray(digest.length - 8); // last 8 bytes for the low digits
-  let h = 0n;
-  for (const b of bytes) h = (h << 8n) | BigInt(b);
-  return h % (10n ** NONCE_DIGITS);
+  return BigInt(`0x${digest.toString('hex')}`) % NONCE_MODULUS;
 }
 
 function rawFromHeader(context: Context): string | null {
@@ -92,41 +139,16 @@ function signatureFrom(context: Context): string | null {
 }
 
 /**
- * Convert a currency price (in USD micros) to XNO raw exactly, treating the rate
- * as a decimal string so nothing leaves integer arithmetic and no float breaks
- * the high-digits-price / low-digits-nonce layout.
+ * Convert a price in USD micros to XNO raw in integer arithmetic, with the low
+ * NONCE_DIGITS digits cleared for the nonce. Rounds down (in the payer's favour)
+ * by less than 10^NONCE_DIGITS raw.
  */
-function toRaw(micros: bigint, xnoPerUsd: number): string {
-  // Normalise the rate through a decimal string: strip a trailing ".0", expand a
-  // small exponent like "1e-7", and drop any trailing zeros after the point so
-  // the decimal count is exact.
-  let s = String(xnoPerUsd).toLowerCase();
-  const expMatch = /e([+-]?\d+)$/.exec(s);
-  if (expMatch !== null) {
-    const exp = Number(expMatch[1]);
-    const mantissa = s.slice(0, expMatch.index);
-    const dot = mantissa.indexOf('.');
-    const digits = mantissa.replace('.', '');
-    const dotPos = dot === -1 ? digits.length : dot; // digits before the point
-    const nd = dotPos + exp;
-    if (nd <= 0) {
-      s = `0.${'0'.repeat(-nd)}${digits}`;
-    } else if (nd >= digits.length) {
-      s = digits + '0'.repeat(nd - digits.length);
-    } else {
-      s = `${digits.slice(0, nd)}.${digits.slice(nd)}`;
-    }
-  }
-  // Now s has no exponent. Strip trailing zeros after the decimal point.
-  const dot = s.indexOf('.');
-  if (dot !== -1) {
-    s = s.replace(/\.?0+$/, '');
-  }
-  const digits = s.includes('.') ? s.replace('.', '') : s;
-  const decimals = s.includes('.') ? s.length - s.indexOf('.') - 1 : 0;
-  const scale = 24n - BigInt(decimals);
-  const amount = scale >= 0n ? micros * BigInt(digits) * 10n ** scale : (micros * BigInt(digits)) / 10n ** -scale;
-  return amount.toString();
+export function toRaw(micros: bigint, rate: Decimal): string {
+  const scale = MICROS_TO_RAW_SCALE - rate.decimals;
+  const exact = scale >= 0
+    ? micros * rate.digits * 10n ** BigInt(scale)
+    : (micros * rate.digits) / 10n ** BigInt(-scale);
+  return ((exact / NONCE_MODULUS) * NONCE_MODULUS).toString();
 }
 
 /** Wrap an RPC failure as a provider error so core serves 503 rather than guessing. */
@@ -145,15 +167,20 @@ async function verifySignature(
   return ok ? signature : null;
 }
 
-/** The exact payable amount for a quote: price raw + the quote's nonce. */
+/** Price raw + this quote's nonce: the only amount that pays this quote. */
+function payableFor(quote: Quote, amountRaw: unknown): string {
+  if (typeof amountRaw !== 'string' || !/^\d+$/.test(amountRaw)) return '';
+  return (BigInt(amountRaw) + nonceIntOf(quote)).toString();
+}
+
+/**
+ * The exact payable amount, read from the nano offer the quote itself carries —
+ * what the 402 challenged with. The rate is NEVER read here, so a rate that moved
+ * after the quote cannot refuse a payer who sent exactly the challenged amount.
+ */
 function payableOf(quote: Quote): string {
   const offer = quote.offers.find((o) => o.rail === 'nano');
-  if (offer === undefined) return '';
-  // The offer amount is the price raw this rail challenged with. The rate is
-  // NEVER re-read here: the quote binds the amount, so a rate movement between
-  // quote-time and verify cannot refuse a payer who sent the quoted amount.
-  const base = BigInt(offer.details?.amountRaw as string);
-  return (base + nonceIntOf(quote)).toString();
+  return offer === undefined ? '' : payableFor(quote, offer.details?.amountRaw);
 }
 
 /**
@@ -204,6 +231,13 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
     && (options.signer === null || typeof options.signer.sendFor !== 'function')) {
     throw new TollstileError('CONFIG_INVALID', 'nanoRail was given a signer without a usable sendFor() function. Omit `signer` entirely for no refunds, or supply a NanoSigner, so a failed handler cannot discover this after the payment has moved on-chain.');
   }
+  // `onSettled` was removed in 0.3.0: it ran inside `verify`, and core calls
+  // `verify` BEFORE its single-use check, so a replayed block or an
+  // Idempotency-Key retry fired it again. A JavaScript caller upgrading from
+  // 0.2.x would otherwise have it silently ignored and stop booking payments.
+  if ((options as { onSettled?: unknown }).onSettled !== undefined) {
+    throw new TollstileError('CONFIG_INVALID', 'nanoRail no longer accepts onSettled (it fired again on a replay). Use createTollstile({ onEvent }) and book on `authorization.opened` with `created: true`, or `charge.moved`; core emits those once, after its ledger has decided.');
+  }
   const merchant = options.merchantAccount;
   const rpc = options.rpc;
   const verifier = options.verifier;
@@ -222,8 +256,9 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
     },
 
     offer: async ({ price }) => {
-      const rate = await currentRate(options.xnoPerUsd);
-      const amount = toRaw(price.micros, rate);
+      // The ONLY place the rate is read. The amount goes into the quote's offer,
+      // and verify takes it from there.
+      const amount = toRaw(price.micros, await currentRate(options.xnoPerUsd));
       if (BigInt(amount) <= ZERO) return null;
       return {
         rail: 'nano',
@@ -238,8 +273,7 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
       // The exact payable amount: the price raw plus the quote's nonce. Only the
       // payer holding THIS quote can produce it, and it cannot redeem any other
       // block the merchant has ever received.
-      const base = BigInt(offer.details.amountRaw as string);
-      const payable = (base + nonceIntOf(quote)).toString();
+      const payable = payableFor(quote, offer.details.amountRaw);
       return Promise.resolve({
         headers: [
           [NANO_BLOCK_HEADER, ''],
