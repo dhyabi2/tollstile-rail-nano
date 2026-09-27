@@ -81,11 +81,14 @@ export type NanoRailOptions = {
    */
   readonly verifier: NanoSignatureVerifier;
   /**
-   * How many XNO one US dollar is worth, evaluated at quote time. REQUIRED: a rail
-   * must never assume a default rate, or a static constant silently undercharges
-   * the merchant on a volatile asset. Pass a number or a function called per quote.
+   * How many XNO one US dollar is worth, read once per quote and never again: the
+   * challenged amount travels in the quote, so a later rate cannot change what a
+   * payer owes. REQUIRED, with no default (a static constant silently undercharges
+   * on a volatile asset). Prefer a decimal string ("0.0123"): it is exact. A number
+   * is accepted and read through its decimal form. Or pass a function returning
+   * either, called per quote.
    */
-  readonly xnoPerUsd: number | (() => number | Promise<number>);
+  readonly xnoPerUsd: string | number | (() => string | number | Promise<string | number>);
 };
 
 /** HTTP header the paying agent uses to present its Nano block hash. */
