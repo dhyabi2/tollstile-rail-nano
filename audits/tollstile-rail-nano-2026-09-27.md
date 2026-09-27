@@ -59,7 +59,7 @@ still refunds a failed handler by reverse send:
 
 ```
 $ npm test
-21 passed (21)          # 13 rail unit tests + 8 conformance
+21 passed (21)          # 13 rail unit tests + 8 conformance  (24 after the guard tests below)
 $ npm run typecheck && npm run build
 clean
 ```
@@ -79,8 +79,21 @@ subtype     = receive        -> denied proof_invalid
 confirmed   = false          -> denied proof_invalid (detail "proof_pending", retryable true)
 ```
 
-So the guards that stop a payer redeeming an unrelated block do refuse. They are still *untested*,
-which is a separate concern and is going up as its own pull request rather than being folded in here.
+So the guards that stop a payer redeeming an unrelated block do refuse — and they are now **tested**, in
+a second pull request kept separate from the money-path guard above. How much they were protecting is
+worth recording: with those two lines deleted, all three cases are **admitted**.
+
+```
+$ # with `if (!block.confirmed) ...` and `if (block.destination !== merchant || subtype !== 'send') ...` removed
+× rejects a confirmed send of the right amount that paid SOMEBODY ELSE   expected 'admitted' to be 'denied'
+× rejects a block that is not a send (a receive presented as a payment)  expected 'admitted' to be 'denied'
+× refuses a block that has not confirmed, and says so retryably          expected 'admitted' to be 'denied'
+```
+
+That is a payer redeeming a send to a third party, an incoming receive block, or a block that has not
+confirmed — each admitted with a correct signature and a correct amount. The guards were right all
+along; nothing had ever held them to it. 24 passed after, typecheck and build clean, and `src/` is
+untouched by that pull request.
 
 **`payableOf`'s `BigInt(offer.details?.amountRaw as string)` is not reachable through core.** Core's own
 types make `Offer.details` a required `JsonObject` (`types-DTzulQmF.d.ts:168`), and the only producer of

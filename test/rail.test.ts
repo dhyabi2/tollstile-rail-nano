@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { nanoProvider } from '../src/nano-provider.js';
 import { nanoRail } from '../src/nano-rail.js';
+import type { NanoBlockInfo } from '../src/nano-types.js';
 import { NANO_BLOCK_HEADER, NANO_QUOTE_HEADER, NANO_SIGNATURE_HEADER } from '../src/nano-types.js';
 
 const MERCHANT = 'nano_3merchantaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -185,6 +186,85 @@ describe('nano rail', () => {
     const paid = await enter({ hash: wrong, signature, quote });
     expect(paid.kind).toBe('denied');
     expect(settledHashes.length).toBe(0);
+  });
+
+  // The three guards below are what stop a payer redeeming a block that is not the
+  // payment for this quote: a send to somebody else, a receive or open block
+  // presented as a payment, and a block that has not confirmed yet. Until now none
+  // of them had a test, because the fake provider cannot produce those shapes --
+  // `nano-provider.ts` fixes `subtype: 'send' = 'send'` and `pay()` always sends
+  // payer -> merchant. So the rail was driven through a bespoke `rpc` instead,
+  // which can answer with any block shape without widening the shipped fake.
+  const guardCase = async (block: (payable: string, payer: string) => NanoBlockInfo) => {
+    const provider = nanoProvider(MERCHANT);
+    let payable = '0';
+    const toll = createTollstile({
+      rails: [
+        nanoRail({
+          merchantAccount: MERCHANT,
+          verifier: provider,
+          signer: provider,
+          xnoPerUsd: XNO_PER_USD,
+          // Answers for ANY hash, so the block shape is the only thing under test.
+          rpc: { blockInfo: (h: string) => Promise.resolve(block(payable, provider.payerAccount)) },
+        }),
+      ],
+      ledger: memoryLedger(),
+      secret: 'nano-guard-test-secret-0123456789abcdef',
+    });
+    const gate = toll.price('$1', { resource: 'GET /report' });
+    const ctx = (headers: Record<string, string> = {}) =>
+      httpContext(new Request('https://example.test/report', { headers }), { resource: 'GET /report' });
+    const challenge = await gate.enter(ctx());
+    if (challenge.kind !== 'denied') throw new Error('expected a 402');
+    const accepts = acceptsOf(challenge.denial);
+    payable = accepts.amountRaw;
+    const paid = await gate.enter(ctx({
+      [NANO_BLOCK_HEADER]: 'any-hash-the-stub-answers-for',
+      [NANO_SIGNATURE_HEADER]: provider.sign(provider.payerAccount, accepts.nonce),
+      [NANO_QUOTE_HEADER]: accepts.quote,
+    }));
+    // The signature and the amount are correct in every case, so only the guard
+    // under test can be the reason the rail refuses.
+    return paid;
+  };
+
+  it('rejects a confirmed send of the right amount that paid SOMEBODY ELSE', async () => {
+    const paid = await guardCase((payable, payer) => ({
+      hash: 'h', confirmed: true, source: payer,
+      destination: 'nano_3someoneelseaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      amountRaw: payable, subtype: 'send',
+    }));
+    expect(paid.kind).toBe('denied');
+    if (paid.kind === 'denied') expect(paid.denial.error.code).toMatch(/proof_invalid/);
+  });
+
+  it('rejects a block that is not a send (a receive presented as a payment)', async () => {
+    const paid = await guardCase((payable, payer) => ({
+      hash: 'h', confirmed: true, source: payer, destination: MERCHANT,
+      amountRaw: payable, subtype: 'receive' as NanoBlockInfo['subtype'],
+    }));
+    expect(paid.kind).toBe('denied');
+    if (paid.kind === 'denied') expect(paid.denial.error.code).toMatch(/proof_invalid/);
+  });
+
+  it('refuses a block that has not confirmed, and says so retryably', async () => {
+    const paid = await guardCase((payable, payer) => ({
+      hash: 'h', confirmed: false, source: payer, destination: MERCHANT,
+      amountRaw: payable, subtype: 'send',
+    }));
+    expect(paid.kind).toBe('denied');
+    if (paid.kind !== 'denied') return;
+    // The rail's own reason survives as `detail`, and core marks it retryable, so a
+    // client CAN tell "in flight" from "this proof is wrong". Note what the
+    // human-readable message says, though: core has no pending verification status
+    // (Verification is absent | invalid | valid) and `proof_pending` is not one of
+    // its DenialCodes, so the message reads "Pay again using this response" to a
+    // payer whose XNO has already left their account. Pinned here as the behaviour
+    // this rail actually has - not as the behaviour it should have.
+    const error = paid.denial.error as { code: string; retryable?: boolean; detail?: string };
+    expect(error.detail).toBe('proof_pending');
+    expect(error.retryable).toBe(true);
   });
 
   it('a failed handler refunds by reverse send so the merchant keeps no money', async () => {
