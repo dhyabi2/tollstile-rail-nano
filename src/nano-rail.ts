@@ -193,6 +193,17 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
   if (options.verifier === undefined || options.verifier === null || typeof options.verifier.verify !== 'function') {
     throw new TollstileError('CONFIG_INVALID', 'nanoRail requires a verifier (NanoSignatureVerifier) with a verify() function, to admit real payments (proof-of-possession).');
   }
+  // Same reasoning for the refund signer, which had only `=== undefined` and so
+  // let null and half-built objects through to `refund`. Omitting a signer is a
+  // documented configuration (no refunds); supplying an UNUSABLE one is a
+  // configuration mistake, and the only place it showed was inside the refund --
+  // after the payer's block had confirmed on-chain and the handler had already
+  // failed, as a TypeError out of the operator's own completion call. That is the
+  // worst possible moment to learn of it, so it is refused at construction too.
+  if (options.signer !== undefined
+    && (options.signer === null || typeof options.signer.sendFor !== 'function')) {
+    throw new TollstileError('CONFIG_INVALID', 'nanoRail was given a signer without a usable sendFor() function. Omit `signer` entirely for no refunds, or supply a NanoSigner, so a failed handler cannot discover this after the payment has moved on-chain.');
+  }
   const merchant = options.merchantAccount;
   const rpc = options.rpc;
   const verifier = options.verifier;

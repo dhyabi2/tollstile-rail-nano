@@ -118,6 +118,37 @@ describe('nano rail', () => {
     expect(() => nanoRail({ ...base, rpc: provider, verifier: provider })).not.toThrow();
   });
 
+  it('fails closed at construction for a signer that is present but unusable', async () => {
+    // The same hazard PR #1 closed for the verifier, in the one place it was not
+    // applied. `refund` guarded only `signer === undefined`, so a signer that
+    // arrived null or half-built -- from JSON, an env read, a DI container --
+    // survived construction and died inside the refund:
+    //
+    //   signer=null                        TypeError: Cannot read properties of null (reading 'sendFor')
+    //   signer={}                          TypeError: signer.sendFor is not a function
+    //   signer={sendFor:'not a function'}  TypeError: signer.sendFor is not a function
+    //
+    // all three thrown out of `pass.complete('failed')` -- i.e. after the payer's
+    // block has confirmed on-chain AND the handler has already failed. The
+    // operator wanted the money to go back and got an unhandled TypeError
+    // instead, which is the worst moment for a configuration mistake to surface.
+    const base = { merchantAccount: MERCHANT, rpc: nanoProvider(MERCHANT), xnoPerUsd: XNO_PER_USD };
+    const provider = nanoProvider(MERCHANT);
+    for (const bad of [null, {}, 'yes', { sendFor: 'not a function' }]) {
+      expect(() => nanoRail({ ...base, verifier: provider, signer: bad as never })).toThrowError(/signer/i);
+    }
+    // Omitting it stays legal: that is the documented "no refunds" configuration,
+    // and README's "Refunds: read this first" is about exactly that shape.
+    expect(() => nanoRail({ ...base, verifier: provider, signer: undefined })).not.toThrow();
+    expect(() => nanoRail({ ...base, verifier: provider })).not.toThrow();
+    // And a usable signer still refunds a failed handler by reverse send.
+    const { provider: p2, enter } = setup();
+    const paid = await payAndEnter(enter, p2);
+    if (paid.kind !== 'admitted') throw new Error('expected admission');
+    expect((await paid.pass.complete('failed')).settlement).toBe('none');
+    expect(p2.refundCount()).toBe(1);
+  });
+
   it('rejects a proof that points at a block that does not exist', async () => {
     const { provider, enter } = setup();
     const challenge = await enter();
