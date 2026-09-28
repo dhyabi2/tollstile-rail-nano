@@ -542,6 +542,94 @@ describe('nano rail', () => {
     expect(typeof toll.price('$1', { resource: 'readme-install' }).enter).toBe('function');
   });
 
+  /**
+   * The live `block_info` answer for a real confirmed SEND block, captured from
+   * rpc.nano.to on 2026-09-28 (hash CABB659A...E819). Two fields are the whole
+   * point of the fixture: `confirmed` arrives as the STRING "true", and the
+   * destination of a send is `contents.link_as_account` -- there is no top-level
+   * `link_account` field in the response at all.
+   */
+  function liveSendResponse(): Record<string, any> {
+    return {
+      block_account: 'nano_3nhh9atngrher9zzackjhxhof3ijnxxp8paer9xo9z7utj69icg8h8weyuxh',
+      amount: '352000000000000000000000000',
+      balance: '0',
+      height: '2',
+      confirmed: 'true',
+      contents: {
+        type: 'state',
+        account: 'nano_3nhh9atngrher9zzackjhxhof3ijnxxp8paer9xo9z7utj69icg8h8weyuxh',
+        link: '25146764A6EE0CDB7FD965B8EDDA4EF8CC1971E07D7AB9FD42C69AFBEDCD8ACE',
+        link_as_account: 'nano_1banexkcfuieufzxksfrxqf6xy8e57ry1zdtq9yn7jntzhpwu4pg4hajojmq',
+      },
+      subtype: 'send',
+    };
+  }
+
+  /** `examples/rpc-network-check.mjs` is the read model an operator copies. */
+  async function exampleToBlockInfo(): Promise<(data: unknown, hash: string) => NanoBlockInfo> {
+    const href = new URL('../examples/rpc-network-check.mjs', import.meta.url).href;
+    const mod = await import(/* @vite-ignore */ href);
+    return mod.toBlockInfo as (data: unknown, hash: string) => NanoBlockInfo;
+  }
+
+  it("the example's read model maps a real live-network send block correctly", async () => {
+    const toBlockInfo = await exampleToBlockInfo();
+    const hash = 'CABB659AFF2EDBD86E0399ADED8A3F6265E0EF2605178C8FACE15D36E869E819';
+    const block = toBlockInfo(liveSendResponse(), hash);
+    // "confirmed" is a JSON string on the wire, so `=== true` is false for every
+    // confirmed block the network has.
+    expect(block.confirmed, 'confirmed').toBe(true);
+    // The destination is contents.link_as_account -- not block_account, which is
+    // the SENDER, and not a top-level link_account, which does not exist.
+    expect(block.destination, 'destination').toBe('nano_1banexkcfuieufzxksfrxqf6xy8e57ry1zdtq9yn7jntzhpwu4pg4hajojmq');
+    expect(block.source, 'source').toBe('nano_3nhh9atngrher9zzackjhxhof3ijnxxp8paer9xo9z7utj69icg8h8weyuxh');
+    expect(block.subtype).toBe('send');
+    expect(block.amountRaw).toBe('352000000000000000000000000');
+  });
+
+  it('a genuine payment read through the example adapter is admitted, not denied', async () => {
+    // What the two field reads above cost in the flow that matters: the same
+    // live response shape, for a send that really does pay this merchant the
+    // challenged amount. Misread, it is refused after the payer's XNO has moved.
+    const toBlockInfo = await exampleToBlockInfo();
+    const provider = nanoProvider(MERCHANT);
+    const response = liveSendResponse();
+    response.block_account = provider.payerAccount;
+    response.contents.account = provider.payerAccount;
+    response.contents.link_as_account = MERCHANT;
+    const rail = nanoRail({
+      merchantAccount: MERCHANT,
+      rpc: { blockInfo: (hash: string) => Promise.resolve(toBlockInfo(response, hash)) },
+      verifier: provider,
+      xnoPerUsd: XNO_PER_USD,
+    });
+    const toll = createTollstile({
+      rails: [rail],
+      ledger: memoryLedger(),
+      secret: 'nano-rail-test-secret-0123456789abcdef',
+    });
+    const gate = toll.price('$1', { resource: 'GET /report' });
+    const enter = (p?: { hash?: string; signature?: string; quote?: string }) =>
+      gate.enter(httpContext(requestWith({}, p?.hash ?? '', p?.signature ?? '', p?.quote ?? ''), { resource: 'GET /report' }));
+
+    const challenge = await gate.enter(httpContext(request({}), { resource: 'GET /report' }));
+    if (challenge.kind !== 'denied') throw new Error('expected a 402');
+    const accepts = acceptsOf(challenge.denial);
+    // The payer sends exactly what was challenged, to this merchant.
+    response.amount = accepts.amountRaw;
+
+    const paid = await enter({
+      hash: 'CABB659AFF2EDBD86E0399ADED8A3F6265E0EF2605178C8FACE15D36E869E819',
+      signature: provider.sign(provider.payerAccount, accepts.nonce),
+      quote: accepts.quote,
+    });
+    if (paid.kind !== 'admitted') {
+      throw new Error(`expected admission, got ${paid.denial.error.code} (${String(paid.denial.error.detail)})`);
+    }
+    expect((await paid.pass.complete('succeeded')).settlement).toBe('settled');
+  });
+
   it('the conformance result the README publishes is the result this suite produces', () => {
     // The README tells a Tollstile maintainer to run `npm test` and compare
     // against a printed number, so that number is a claim about this suite and

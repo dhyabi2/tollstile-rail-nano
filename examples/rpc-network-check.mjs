@@ -16,6 +16,8 @@
  *
  * Usage: node examples/rpc-network-check.mjs
  */
+import { pathToFileURL } from 'node:url';
+
 const RPC = 'https://rpc.nano.to';
 const ACCOUNT = 'nano_1banexkcfuieufzxksfrxqf6xy8e57ry1zdtq9yn7jntzhpwu4pg4hajojmq';
 const BLOCK = 'E792FD1FE71FA6C111BC5545747F828348C3CE2EBE8D3173D0BE344F09FC62FE';
@@ -32,17 +34,36 @@ async function rpc(action, params) {
   return data;
 }
 
-async function blockInfo(hash) {
-  const data = await rpc('block_info', { hash });
-  // Mirror the rail's NanoBlockInfo read model.
+/**
+ * Map one `block_info` response onto the rail's NanoBlockInfo read model.
+ *
+ * Exported so the mapping can be held to a recorded response from the live
+ * network without this script making a request.
+ *
+ * Two fields are not where a reader would guess, and both were read wrongly
+ * here until 2026-09-28 (measured against rpc.nano.to):
+ *   - `confirmed` comes back as the STRING "true", not the boolean `true`, so a
+ *     `=== true` test is false for every confirmed block on the network.
+ *   - the destination of a send is `contents.link_as_account`. There is no
+ *     top-level `link_account` field at all, so reading one and falling back to
+ *     `block_account` returned the SENDER as the destination.
+ */
+export function toBlockInfo(data, hash) {
   return {
     hash,
-    confirmed: data.confirmed === true,
+    confirmed: data.confirmed === true || data.confirmed === 'true',
     source: data.block_account,
-    destination: data.link_account ?? data.block_account,
+    // No fallback to `block_account`: a destination we cannot read must fail the
+    // rail's `destination !== merchant` guard, not quietly become the payer.
+    destination: data.contents?.link_as_account ?? '',
     amountRaw: data.amount,
     subtype: data.subtype,
   };
+}
+
+async function blockInfo(hash) {
+  const data = await rpc('block_info', { hash });
+  return toBlockInfo(data, hash);
 }
 
 async function main() {
@@ -69,7 +90,11 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(`RESULT: read path FAILED against the live network — ${e.message}`);
-  process.exit(1);
-});
+// Only reach the network when this file is run as a script, so a test can
+// import `toBlockInfo` above without making a request.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e) => {
+    console.error(`RESULT: read path FAILED against the live network — ${e.message}`);
+    process.exit(1);
+  });
+}
