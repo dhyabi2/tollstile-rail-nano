@@ -139,6 +139,28 @@ function signatureFrom(context: Context): string | null {
 }
 
 /**
+ * The signed quote token: the header first, the MCP `_meta` key second — the same
+ * order AND the same treatment of an empty value as the block and the signature
+ * above. It was read inline with `??`, which is nullish: a header that is present
+ * but EMPTY is not nullish, so `''` won and the quote in `_meta` was never looked
+ * at. The same MCP call then paid over a plain MCP context and was refused
+ * `quote_invalid` over a Streamable-HTTP carrier, where `request` and `mcp` are
+ * both set (Context: `request` is "null for MCP calls that arrive without an HTTP
+ * carrier") and a client echoing the challenge's prefilled empty headers sends
+ * exactly that. The payer's send is already confirmed on-chain by then, and Nano
+ * has no chargeback, so the answer asked them to pay twice.
+ */
+function quoteFrom(context: Context): string | null {
+  if (context.request !== null) {
+    const value = context.request.headers.get(NANO_QUOTE_HEADER);
+    if (value !== null && value !== '') return value;
+  }
+  const meta = context.mcp?.meta[NANO_QUOTE_META];
+  if (typeof meta === 'string' && meta !== '') return meta;
+  return null;
+}
+
+/**
  * Convert a price in USD micros to XNO raw in integer arithmetic, with the low
  * NONCE_DIGITS digits cleared for the nonce. Rounds down (in the payer's favour)
  * by less than 10^NONCE_DIGITS raw.
@@ -301,10 +323,8 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
       if (hash === null || hash.length === 0) return { status: 'absent' };
 
       // The quote this request carries — forged, expired, or wrong-resource opens to undefined.
-      const metaQuote = context.mcp?.meta[NANO_QUOTE_META];
-      const quoteToken = context.request?.headers.get(NANO_QUOTE_HEADER)
-        ?? (typeof metaQuote === 'string' && metaQuote !== '' ? metaQuote : null);
-      const quote = quoteToken ? await terms.openQuote(quoteToken) : undefined;
+      const quoteToken = quoteFrom(context);
+      const quote = quoteToken === null ? undefined : await terms.openQuote(quoteToken);
       if (quote === undefined) {
         // With `quotes: true` the proof must carry a valid, unexpired quote.
         return { status: 'invalid', reason: 'quote_invalid', proofId: hash };

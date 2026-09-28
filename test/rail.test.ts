@@ -630,6 +630,81 @@ describe('nano rail', () => {
     expect((await paid.pass.complete('succeeded')).settlement).toBe('settled');
   });
 
+  it('an empty quote header does not hide the quote in _meta', async () => {
+    // The same MCP call arriving over Streamable HTTP has BOTH `mcp` and `request`
+    // set -- core's Context says `request` is "null for MCP calls that arrive
+    // without an HTTP carrier". `rawFromHeader` and `signatureFrom` are written for
+    // exactly that: a header that is present but EMPTY is skipped and _meta is read
+    // instead, which is what a client echoing the challenge's prefilled
+    // `x-nano-block: ''` and `x-nano-signature: ''` sends. The quote read had no
+    // such guard, so `''` won the `??` and the quote in _meta was never looked at.
+    //
+    // The cost is the worst one this rail has: the payer's send is already
+    // confirmed on-chain when verify runs, and Nano has no chargeback, so the
+    // answer "The quote is forged, expired... Pay with the new quote in this
+    // response" asks them to pay a second time for a payment that went through.
+    const provider = nanoProvider(MERCHANT);
+    const toll = createTollstile({
+      rails: [nanoRail({ merchantAccount: MERCHANT, rpc: provider, verifier: provider, xnoPerUsd: XNO_PER_USD })],
+      ledger: memoryLedger(),
+      secret: 'nano-rail-hybrid-secret-0123456789abcdef',
+    });
+    const gate = toll.price('$1', { resource: 'tool:report' });
+    const unpaid = await gate.enter(mcpContext('report', {}));
+    if (unpaid.kind !== 'denied') throw new Error('expected a payment-required answer');
+    const { amountRaw, nonce, quote } = acceptsOf(unpaid.denial);
+    const hash = provider.pay(amountRaw);
+    const signature = provider.sign(provider.payerAccount, nonce);
+    const meta = { [NANO_BLOCK_META]: hash, [NANO_SIGNATURE_META]: signature, [NANO_QUOTE_META]: quote };
+
+    const overHttpCarrier = {
+      ...mcpContext('report', meta),
+      request: new Request('http://localhost/mcp', {
+        method: 'POST',
+        headers: { [NANO_BLOCK_HEADER]: '', [NANO_SIGNATURE_HEADER]: '', [NANO_QUOTE_HEADER]: '' },
+      }),
+    } as unknown as Parameters<typeof gate.enter>[0];
+
+    const paid = await gate.enter(overHttpCarrier);
+    if (paid.kind !== 'admitted') {
+      throw new Error(`a paid MCP call over an HTTP carrier was denied: ${paid.denial.error.code}`);
+    }
+    const completion = await paid.pass.complete('succeeded');
+    expect(completion.settlement).toBe('settled');
+  });
+
+  it('a header that carries a real value still wins over _meta', async () => {
+    // The fallback must not become a bypass: a non-empty header is still the
+    // value used, so a forged quote in _meta cannot override the header the
+    // client actually sent. This is the direction the change must NOT alter.
+    const provider = nanoProvider(MERCHANT);
+    const toll = createTollstile({
+      rails: [nanoRail({ merchantAccount: MERCHANT, rpc: provider, verifier: provider, xnoPerUsd: XNO_PER_USD })],
+      ledger: memoryLedger(),
+      secret: 'nano-rail-hybrid-secret-0123456789abcdef',
+    });
+    const gate = toll.price('$1', { resource: 'tool:report' });
+    const unpaid = await gate.enter(mcpContext('report', {}));
+    if (unpaid.kind !== 'denied') throw new Error('expected a payment-required answer');
+    const { amountRaw, nonce, quote } = acceptsOf(unpaid.denial);
+    const hash = provider.pay(amountRaw);
+    const signature = provider.sign(provider.payerAccount, nonce);
+
+    const forgedInMeta = {
+      ...mcpContext('report', { [NANO_QUOTE_META]: 'not-a-quote' }),
+      request: requestWith({}, hash, signature, quote),
+    } as unknown as Parameters<typeof gate.enter>[0];
+    const paid = await gate.enter(forgedInMeta);
+    expect(paid.kind).toBe('admitted');
+
+    const forgedInHeader = {
+      ...mcpContext('report', { [NANO_QUOTE_META]: quote }),
+      request: requestWith({}, hash, signature, 'not-a-quote'),
+    } as unknown as Parameters<typeof gate.enter>[0];
+    const denied = await gate.enter(forgedInHeader);
+    expect(denied.kind).toBe('denied');
+  });
+
   it('the conformance result the README publishes is the result this suite produces', () => {
     // The README tells a Tollstile maintainer to run `npm test` and compare
     // against a printed number, so that number is a claim about this suite and
