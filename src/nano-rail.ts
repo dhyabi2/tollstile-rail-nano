@@ -178,6 +178,28 @@ function providerError(action: string, cause: unknown): TollstileError {
   return new TollstileError('PROVIDER_UNAVAILABLE', `Nano RPC did not answer ${action}.`, { cause });
 }
 
+/**
+ * The payer's proof-of-possession, or null.
+ *
+ * The verifier is the operator's own code and it is handed a string that came
+ * straight off the wire, so it can THROW rather than answer false: a real Nano
+ * ED25519 verifier decodes the signature first, and tweetnacl's
+ * `sign.detached.verify` raises `TypeError: bad signature size` for anything that
+ * is not 64 bytes, as does an address decoder given a malformed source. That
+ * exception used to leave `verify` uncaught, so the operator's toll gate threw
+ * instead of answering -- while a throwing `rpc.blockInfo` two lines up was
+ * already wrapped. Measured, same paid request, `signature: 'zz'`:
+ *
+ *     throwing blockInfo  -> denied (retryable)
+ *     throwing verifier   -> TypeError: bad signature size, out of gate.enter()
+ *
+ * It is reported as PROVIDER_UNAVAILABLE, the same as the RPC, and deliberately
+ * NOT as `proof_invalid`: the rail cannot tell a signature it cannot parse from a
+ * verifier that is broken or unreachable, the payer's send is already confirmed
+ * on-chain by the time this line runs, and Nano has no chargeback. A retryable
+ * 503 leaves that block unspent and presentable again; a final refusal would
+ * throw away a real payment whenever the operator's verifier had a bad minute.
+ */
 async function verifySignature(
   verifier: NanoSignatureVerifier,
   source: string,
@@ -185,7 +207,16 @@ async function verifySignature(
   signature: string | null,
 ): Promise<string | null> {
   if (signature === null || signature === '') return null;
-  const ok = await verifier.verify(source, message, signature);
+  let ok: boolean;
+  try {
+    ok = await verifier.verify(source, message, signature);
+  } catch (error) {
+    throw new TollstileError(
+      'PROVIDER_UNAVAILABLE',
+      'The Nano signature verifier did not answer.',
+      { cause: error },
+    );
+  }
   return ok ? signature : null;
 }
 
