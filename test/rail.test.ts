@@ -190,6 +190,59 @@ describe('nano rail', () => {
     expect(settledHashes.length).toBe(0);
   });
 
+  it('a verifier that throws on a malformed signature denies retryably, it does not throw out of the gate', async () => {
+    // A real Nano ED25519 verifier decodes the signature before it can judge it,
+    // and raises on anything that is not a 64-byte signature -- tweetnacl's
+    // sign.detached.verify says "bad signature size". The fake provider used
+    // everywhere else in this file only ever returns false, so nothing here had
+    // ever handed the rail a verifier that throws. The signature is a header, so
+    // the string that reaches it is whatever the caller sent.
+    const provider = nanoProvider(MERCHANT);
+    const rail = nanoRail({
+      merchantAccount: MERCHANT,
+      rpc: provider,
+      verifier: {
+        verify: (account: string, message: string, signature: string) => {
+          if (!/^[0-9a-f]{64}:[0-9a-f]{64}$/.test(signature)) throw new TypeError('bad signature size');
+          return provider.verify(account, message, signature);
+        },
+      },
+      xnoPerUsd: XNO_PER_USD,
+    });
+    const toll = createTollstile({
+      rails: [rail],
+      ledger: memoryLedger(),
+      secret: 'nano-rail-test-secret-0123456789abcdef',
+    });
+    const gate = toll.price('$1', { resource: 'GET /report' });
+    const enter = (headers: Record<string, string>) =>
+      gate.enter(
+        httpContext(new Request('https://example.test/report', { headers }), { resource: 'GET /report' }),
+      );
+
+    const challenge = await enter({});
+    if (challenge.kind !== 'denied') throw new Error('expected a 402');
+    const { amountRaw, quote } = acceptsOf(challenge.denial);
+    // A REAL payment: the block is confirmed on-chain and pays the merchant the
+    // exact quoted amount. Only the signature's encoding is wrong.
+    const hash = provider.pay(amountRaw);
+
+    const paid = await enter({
+      [NANO_BLOCK_HEADER]: hash,
+      [NANO_SIGNATURE_HEADER]: 'zz',
+      [NANO_QUOTE_HEADER]: quote,
+    });
+
+    expect(paid.kind).toBe('denied');
+    if (paid.kind !== 'denied') return;
+    // Retryable, like the RPC's own failure: the payer's XNO has already moved and
+    // cannot be charged back, so the block must stay presentable rather than be
+    // refused for good because the operator's verifier could not read a string.
+    const error = paid.denial.error as { code: string; retryable?: boolean };
+    expect(error.retryable).toBe(true);
+    expect(settledHashes.length).toBe(0);
+  });
+
   it('rejects a payment for a DIFFERENT amount than the quote (replay of an old block)', async () => {
     const { provider, enter } = setup();
     const challenge = await enter();
