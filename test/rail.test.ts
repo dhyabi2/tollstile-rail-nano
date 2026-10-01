@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { nanoProvider } from '../src/nano-provider.js';
 import { nanoRail, parseRate, toRaw } from '../src/nano-rail.js';
 import { harness } from './harness.js';
-import type { NanoBlockInfo } from '../src/nano-types.js';
+import type { NanoBlockInfo, NanoSigner } from '../src/nano-types.js';
 import {
   NANO_BLOCK_HEADER,
   NANO_BLOCK_META,
@@ -27,14 +27,14 @@ let settledHashes: string[] = [];
 type TollstileEvent = Parameters<NonNullable<Parameters<typeof createTollstile>[0]['onEvent']>>[0];
 type Entry = Awaited<ReturnType<ReturnType<typeof setup>['enter']>>;
 
-function setup() {
+function setup(signer?: NanoSigner) {
   const provider = nanoProvider(MERCHANT);
   settledHashes = [];
   const seen = new Set<string>();
   const rail = nanoRail({
     merchantAccount: MERCHANT,
     rpc: provider,
-    signer: provider,
+    signer: signer ?? provider,
     verifier: provider,
     xnoPerUsd: XNO_PER_USD,
   });
@@ -347,6 +347,51 @@ describe('nano rail', () => {
     // The net effect is zero money kept, confirmed by the refund count.
     expect(settledHashes.length).toBe(1);
     expect(provider.refundCount()).toBe(1);
+  });
+
+  it('a refund signer that throws leaves the charge reconcilable instead of throwing out of complete()', async () => {
+    // The merchant's signer is a Nano node or signing service over the network, so
+    // `sendFor` can throw: a socket reset, a 503 from the RPC host, a timeout. The
+    // call was unguarded while every other provider call in the rail was wrapped
+    // (`rpc.blockInfo` in verify and lookup, the verifier in PR #10).
+    //
+    // Core wraps `refund` in `callProvider`, which recognises ONLY a TollstileError
+    // carrying PROVIDER_UNAVAILABLE/PROVIDER_TIMEOUT and re-throws anything else.
+    // So a raw Error came back out of the operator's own `pass.complete('failed')`
+    // -- after the payer's XNO had moved on-chain and the handler had already
+    // failed -- and the charge was left at `refund_pending`, never reaching
+    // `unknown`, which is the only state core revisits with `lookup` to find out
+    // whether the reverse send landed. The money the operator asked to send back
+    // stays with the merchant and nothing records that it is owed.
+    const { provider, enter, ledger, events } = setup({
+      sendFor: () => {
+        throw new Error('nano node unreachable');
+      },
+    });
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+
+    // It must not escape the operator's completion call.
+    const completion = await paid.pass.complete('failed');
+    expect(completion.settlement).toBe('none');
+
+    // It is reported as a provider failure, not as a flat refusal: the send may
+    // have been published and only the reply lost, so `rejected` would assert the
+    // money did not move and invite a second reverse send.
+    const failures = events.filter((event) => event.type === 'error');
+    expect(failures.length).toBe(1);
+    const error = (failures[0] as { error: unknown }).error;
+    expect(error).toBeInstanceOf(TollstileError);
+    expect((error as TollstileError).code).toBe('PROVIDER_UNAVAILABLE');
+    expect((error as TollstileError).cause).toBeInstanceOf(Error);
+
+    // And the charge is parked where reconciliation can find it.
+    const [charge] = ledger.charges();
+    expect(charge.payment).toBe('unknown');
+    expect(charge.pending).toBe('refund');
+
+    // No reverse send was recorded, because none succeeded.
+    expect(provider.refundCount()).toBe(0);
   });
 
   it('a repeated settle with the same key has no second effect', async () => {

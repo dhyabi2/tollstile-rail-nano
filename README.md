@@ -99,7 +99,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **26 passed**, including a rate that moves between quote and
+Rail unit tests: **27 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, and rates given
 as strings, exponents and noisy floats.

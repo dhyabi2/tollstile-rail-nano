@@ -422,7 +422,31 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
       if (signer === undefined) return { status: 'rejected', reason: 'refund_unsupported' };
       const data = authorization.data;
       // Reverse the payment: the merchant sends the settled amount back to the payer.
-      const reference = await signer.sendFor(data.source, data.amountRaw, { refundOf: data.hash });
+      //
+      // The signer is the operator's own Nano node or signing service, so the send
+      // can THROW -- a socket reset, a 503 from the RPC host, a timeout. Core wraps
+      // `refund` in `callProvider`, which recognises ONLY a TollstileError carrying
+      // PROVIDER_UNAVAILABLE/PROVIDER_TIMEOUT; every other error is re-thrown, out
+      // of the operator's own `pass.complete('failed')`. Measured, same failed
+      // handler, `sendFor` throwing:
+      //
+      //     raw Error              -> charge stuck at refund_pending, Error out of complete()
+      //     PROVIDER_UNAVAILABLE   -> refund_pending -> unknown (pending=refund), complete() returns
+      //
+      // The second is the outcome that can be reconciled: only a charge in
+      // `unknown` is picked up again, and core then calls `lookup` to find out
+      // whether the reverse send actually landed. Left raw, the payer's XNO has
+      // moved, the handler has failed, the merchant still holds the money, and the
+      // one record that would get it back is never written. A failed send is also
+      // genuinely UNKNOWN -- the block may have been published and only the reply
+      // lost -- so it is reported as unavailable, never as `rejected`, which would
+      // assert the money did not move and risk a second reverse send.
+      let reference: string;
+      try {
+        reference = await signer.sendFor(data.source, data.amountRaw, { refundOf: data.hash });
+      } catch (error) {
+        throw providerError(`the refund send for ${data.hash}`, error);
+      }
       return { status: 'refunded', reference };
     },
 
