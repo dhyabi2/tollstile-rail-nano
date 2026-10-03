@@ -130,8 +130,8 @@ someone else's repository (Tier 0 group 4), not here.
 - **No secrets in the tree or history.** No tracked `.env`, `.pem` or `.key`, no token shapes, no
   private-key blocks. The 64-hex strings are the fake provider's derived test seeds, which resolve
   to the fake accounts in `nano-provider.ts` and to nothing on any network.
-- **Dependencies.** `npm audit --omit=dev` reports 0 vulnerabilities; the full tree including dev
-  reports 0 as well.
+- **Dependencies.** `npm audit --omit=dev` reports 0 vulnerabilities — nothing a consumer installs
+  is affected, and `files` ships only `dist` and `README.md`.
 - **The README's published numbers** match the suite exactly: conformance 7 passed / 2 skipped,
   rail units 27.
 
@@ -148,3 +148,19 @@ someone else's repository (Tier 0 group 4), not here.
   send.** I verified the charge reaches the state core revisits and that `lookup` is the call it
   makes from there. Driving a full reconciliation cycle needs a signer that fails and then
   succeeds, which is operator-side behaviour this repository does not model.
+
+
+## Correction, 2026-10-03
+
+The dependencies line above originally also claimed "the full tree including dev reports 0 as
+well." **I did not run that.** The only command I ran was `npm audit --omit=dev`; the full-tree
+claim was carried over from the 09-29 note without being re-checked, and it should not have been
+written. The line now says only what was measured.
+
+Run today on the rebased tree, the full tree reports **5 vulnerabilities (3 moderate, 1 high, 1
+critical)**, all in the `vitest`/`vite` dev chain — `vitest`, `@vitest/mocker`, `vite`,
+`vite-node`, `esbuild`. None is reachable by a consumer: `npm audit --omit=dev` is still 0 and
+`package.json` ships only `dist` and `README.md`. Whether these advisories already applied on
+10-01 I cannot say, because I did not look. Not fixed here — `npm audit fix --force` wants a
+`vitest` major, which is a dependency decision and nothing to do with this branch's one-line
+refund fix.
