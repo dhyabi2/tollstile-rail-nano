@@ -603,7 +603,11 @@ describe('nano rail', () => {
     if (paid.kind !== 'admitted') throw new Error(`expected admission over MCP, got ${paid.denial.error.code}`);
     const completion = await paid.pass.complete('succeeded');
     expect(completion.settlement).toBe('settled');
-    expect(completion.receipt.headers[0]).toEqual([NANO_BLOCK_HEADER, hash]);
+    // The receipt names the block in its CANONICAL (upper-case) form -- the same
+    // block, spelled the way an explorer and the network spell it, not the way this
+    // caller happened to type it. The rail canonicalises the hash on the way in
+    // because it is the single-use identity of the payment.
+    expect(completion.receipt.headers[0]).toEqual([NANO_BLOCK_HEADER, hash.toUpperCase()]);
   });
 
   it('the README install snippet constructs a Tollstile that can price', () => {
@@ -801,6 +805,66 @@ describe('nano rail', () => {
     } as unknown as Parameters<typeof gate.enter>[0];
     const denied = await gate.enter(forgedInHeader);
     expect(denied.kind).toBe('denied');
+  });
+
+  it('the same block presented with a different hex case cannot settle a second charge', async () => {
+    // A Nano block hash is CASE-INSENSITIVE on the network. Measured against the
+    // public RPC on 2026-10-04, `block_info` for
+    //   E792FD1FE71FA6C111BC5545747F828348C3CE2EBE8D3173D0BE344F09FC62FE
+    // and for the same 64 characters lowercased returned the SAME block, byte for
+    // byte (nano's `decode_hex` reads either case). The fake provider models that.
+    //
+    // Core's single-use check is `alreadyUsed`, which looks up
+    // `deriveId('auth', rail.name, proofId)` -- so the one thing standing between a
+    // confirmed send and being spent twice is the rail's `proofId`. The rail passed
+    // the header through verbatim, so the PAYER chose the identity of their own
+    // payment: present `ABCD...` and then `abcd...` and core sees two unrelated
+    // proofs. Quotes do not close this -- they are stateless signed tokens, valid
+    // for their whole TTL and openable as often as you like.
+    //
+    // One payment, two served requests, and the merchant is short the second one.
+    const { provider, rail } = setup();
+    const events: TollstileEvent[] = [];
+    const toll = createTollstile({
+      rails: [rail],
+      ledger: memoryLedger(),
+      secret: 'nano-rail-casing-secret-0123456789abcdef',
+      onEvent: (event) => events.push(event),
+    });
+    const gate = toll.price('$1', { resource: 'GET /report' });
+    const go = (p?: { hash: string; signature: string; quote: string }) =>
+      gate.enter(httpContext(
+        p === undefined ? request({}) : requestWith({}, p.hash, p.signature, p.quote),
+        { resource: 'GET /report' },
+      ));
+
+    const challenge = await go();
+    if (challenge.kind !== 'denied') throw new Error('expected a 402');
+    const { amountRaw, nonce, quote } = acceptsOf(challenge.denial);
+    const hash = provider.pay(amountRaw);
+    const signature = provider.sign(provider.payerAccount, nonce);
+
+    const paid = await go({ hash, signature, quote });
+    if (paid.kind !== 'admitted') throw new Error('expected admission');
+    await paid.pass.complete('succeeded');
+
+    // The same block, the same quote, the same signature -- only the hex case of
+    // the hash differs, and it names the same block on the network.
+    const recased = hash.toUpperCase() === hash ? hash.toLowerCase() : hash.toUpperCase();
+    expect(recased, 'the recased hash must differ as TEXT').not.toBe(hash);
+    const again = await go({ hash: recased, signature, quote });
+    expect(again.kind, 'a recasing of a spent block must not be admitted').not.toBe('admitted');
+    // core recognises the second presentation as the request that was already paid
+    // (409, `action: stop`): "It is not charged or run again."
+    if (again.kind === 'denied') expect(again.denial.error.code).toBe('already_paid');
+
+    // One send, one authorization, one settled charge.
+    const opened = events.filter((e) => e.type === 'authorization.opened' && e.created);
+    expect(opened.length, 'authorizations opened').toBe(1);
+    const settledCharges = new Set(
+      events.flatMap((e) => (e.type === 'charge.moved' && e.charge.payment === 'settled' ? [e.charge.id] : [])),
+    );
+    expect(settledCharges.size, 'charges settled').toBe(1);
   });
 
   it('the conformance result the README publishes is the result this suite produces', () => {
