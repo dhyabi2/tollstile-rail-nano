@@ -63,11 +63,21 @@ export function nanoProvider(merchantAccount: string): NanoProvider {
   const payerAccount = 'nano_1fakepayer0000000000000000000000000000000000000000000000000';
   const blocks = new Map<string, NanoBlockInfo>();
   const accepted = new Set<string>();
+  /**
+   * A block hash is CASE-INSENSITIVE on the real network: nano reads a hash with
+   * `decode_hex`, which takes either case. Measured against the public RPC on
+   * 2026-10-04, `block_info` for
+   * `E792FD1FE71FA6C111BC5545747F828348C3CE2EBE8D3173D0BE344F09FC62FE` and for the
+   * same characters lowercased returned the SAME block, field for field. The fake
+   * keys its ledger the same way, because the rail's single-use identity is derived
+   * from the hash it is handed and a case-sensitive fake cannot see that.
+   */
+  const key = (hash: string) => hash.toUpperCase();
   let refunds = 0;
   const confirmedSend = (source: string, destination: string, amountRaw: string, subtype: 'send' = 'send') => {
     const hash = hashFor('fail_');
     const block: NanoBlockInfo = { hash, confirmed: true, source, destination, amountRaw, subtype };
-    blocks.set(hash, block);
+    blocks.set(key(hash), block);
     return { hash, block };
   };
 
@@ -80,7 +90,7 @@ export function nanoProvider(merchantAccount: string): NanoProvider {
     },
 
     blockInfo(hash: string): Promise<NanoBlockInfo | undefined> {
-      return Promise.resolve(blocks.get(hash));
+      return Promise.resolve(blocks.get(key(hash)));
     },
 
     sendFor(destination: string, amountRaw: string): Promise<string> {
@@ -98,8 +108,8 @@ export function nanoProvider(merchantAccount: string): NanoProvider {
     },
 
     confirmIn(hash: string): void {
-      const block = blocks.get(hash);
-      if (block !== undefined && block.confirmed) accepted.add(hash);
+      const block = blocks.get(key(hash));
+      if (block !== undefined && block.confirmed) accepted.add(key(hash));
     },
 
     settlements(): number {

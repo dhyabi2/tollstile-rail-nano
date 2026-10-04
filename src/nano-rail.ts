@@ -173,6 +173,29 @@ export function toRaw(micros: bigint, rate: Decimal): string {
   return ((exact / NONCE_MODULUS) * NONCE_MODULUS).toString();
 }
 
+/**
+ * The canonical form of a presented block hash: upper case.
+ *
+ * A Nano block hash is case-insensitive on the network - nano reads it with
+ * `decode_hex`, which takes either case - but core's single-use check is
+ * `deriveId('auth', rail.name, proofId)` over the `proofId` THIS rail returns, and
+ * the rail passed the payer's header through verbatim. So the payer chose the
+ * identity of their own payment. Measured against the public RPC on 2026-10-04,
+ * `block_info` for `E792FD1F...FC62FE` and for the same characters lowercased
+ * answered the SAME block, field for field; presenting one confirmed send as
+ * `ABCD...` and then as `abcd...` therefore opened a SECOND authorization and
+ * settled a SECOND charge off one payment. The quote does not close it: a quote is a
+ * stateless signed token, openable as often as you like until it expires.
+ *
+ * Canonicalising here is the only place that can fix it, because the rail owns
+ * `proofId`. It is a refusal and nothing else: a hash that is admitted today is
+ * still admitted, for the same amount to the same destination - the second
+ * presentation of it is now `proof_already_used` instead of a second charge.
+ */
+function canonicalHash(hash: string): string {
+  return hash.toUpperCase();
+}
+
 /** Wrap an RPC failure as a provider error so core serves 503 rather than guessing. */
 function providerError(action: string, cause: unknown): TollstileError {
   return new TollstileError('PROVIDER_UNAVAILABLE', `Nano RPC did not answer ${action}.`, { cause });
@@ -350,8 +373,11 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
     },
 
     async verify(context: Context, terms: VerifyTerms): Promise<Verification<NanoData>> {
-      const hash = rawFromHeader(context);
-      if (hash === null || hash.length === 0) return { status: 'absent' };
+      const presented = rawFromHeader(context);
+      if (presented === null || presented.length === 0) return { status: 'absent' };
+      // Canonical from here on: the hash is this payment's identity to core, so the
+      // casing the payer happened to send must not be part of it.
+      const hash = canonicalHash(presented);
 
       // The quote this request carries — forged, expired, or wrong-resource opens to undefined.
       const quoteToken = quoteFrom(context);
