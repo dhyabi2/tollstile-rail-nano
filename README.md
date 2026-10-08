@@ -99,7 +99,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **28 passed**, including a rate that moves between quote and
+Rail unit tests: **29 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, and rates given
 as strings, exponents and noisy floats.
@@ -109,6 +109,48 @@ public Test Network endpoints listed in Nano's docs (`test.nano.org`) do not
 resolve as of 2026-09-27, and the Beta network's faucet is a Discord channel;
 `examples/rpc-network-check.mjs` checks the read path (`block_info`) against the
 live network, read-only.
+
+## Do not install the npm `latest`: every published version settles twice
+
+**npm `latest` is `0.3.1`, published 2026-09-24. This repository is `0.3.2`. The
+four versions on npm (`0.1.0`, `0.2.0`, `0.3.0`, `0.3.1`) all pre-date the fix
+below, so `npm i tollstile-rail-nano` installs a rail that can be paid once and
+charge twice.** Require `0.3.2` or later; until it is on npm, install this
+repository directly.
+
+Measured against the real published package in a fresh project
+(`npm i tollstile@0.1.2 tollstile-rail-nano@0.3.1`), driving core with a fake
+network whose only Nano-specific behaviour is that `block_info` answers the same
+block for either hex case — which is what the live RPC does:
+
+```
+402 challenge: pay 10000000000000000003952791648 raw to the merchant
+payer published ONE confirmed send: E792FD1F...F09FC0000
+presentation 1 (as sent)  -> admitted
+presentation 2 (lowercased, SAME block on the network) -> admitted
+---
+sends the payer actually made : 1
+authorizations opened         : 2
+charges SETTLED               : 2
+VULNERABLE: 2 charges settled off 1 payment(s)
+```
+
+Two defects reach a payer in those versions, both fixed here:
+
+1. **One confirmed send settles two charges (`0.3.2`).** `verify` used the hash as
+   the payer typed it for `proofId`, and core's single-use check is derived from
+   `proofId`, so the payer chose the identity of their own payment. A Nano block
+   hash is case-insensitive on the network, so `ABCD…` and `abcd…` are one block
+   and two proofs. `0.3.2` canonicalises the hash first.
+2. **A paid request answered `quote_invalid` (`0.3.2`).** The quote token was read
+   with `??`, which is nullish, so an HTTP header present but EMPTY won over the
+   quote in the MCP `_meta` — exactly what a client echoing the challenge's
+   prefilled headers sends over a Streamable-HTTP carrier. The payer's send is
+   already confirmed on-chain by then and Nano has no chargeback, so the answer
+   asked them to pay twice.
+
+Publishing is not something this repository can do for you; the version here is
+the fixed one.
 
 ## Install
 

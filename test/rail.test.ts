@@ -867,6 +867,28 @@ describe('nano rail', () => {
     expect(settledCharges.size, 'charges settled').toBe(1);
   });
 
+  it('the version the README tells you to require is the version this package is', () => {
+    // The four versions on npm all pre-date #15, so `npm i tollstile-rail-nano`
+    // installs a rail that settles two charges off one confirmed send (measured
+    // against the published 0.3.1 in a fresh project; the output is in the README).
+    // Publishing is the owner's, so the README carries the advisory instead -- and
+    // an advisory that names a version goes stale the moment the version moves,
+    // exactly like the test-count claim below. So the suite owns the number.
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version: string;
+    };
+
+    const claim = /Require `([0-9]+\.[0-9]+\.[0-9]+)` or later/.exec(readme);
+    expect(claim, 'the README no longer tells a reader which version to require').not.toBeNull();
+    expect(claim![1], 'the README requires a version this package is not').toBe(pkg.version);
+
+    // And the advisory must not name this package's own version as a BAD one.
+    const affected = /four versions on npm \(([^)]*)\)/.exec(readme);
+    expect(affected, 'the README no longer lists the affected published versions').not.toBeNull();
+    expect(affected![1], 'the README lists this version as affected').not.toContain(pkg.version);
+  });
+
   it('the conformance result the README publishes is the result this suite produces', () => {
     // The README tells a Tollstile maintainer to run `npm test` and compare
     // against a printed number, so that number is a claim about this suite and
