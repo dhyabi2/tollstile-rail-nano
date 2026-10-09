@@ -929,3 +929,141 @@ function requestWith(headers: Record<string, string>, hash: string, signature: s
   h[NANO_QUOTE_HEADER] = quote;
   return new Request('https://example.test/report', { headers: h });
 }
+
+describe('the rail reads its injected dependencies for what they are, not for truthiness', () => {
+  // `rpc` and `verifier` are the operator's own code. The published package is
+  // JavaScript, so `NanoBlockInfo.confirmed: boolean` and
+  // `NanoSignatureVerifier.verify: Promise<boolean>` are not enforced at runtime
+  // -- the same premise the two construction guards in `nanoRail` are written
+  // under. Both gates below used a truthiness test, and a truthy non-`true`
+  // answer admitted a payment that had to be refused.
+
+  /** The rail as `setup` builds it, with one dependency wrapped.
+   *
+   * Both overrides are BOXED (`{ value }`), because `undefined` is one of the
+   * answers under test: a bare `confirmedAs: undefined` could not be told apart
+   * from "do not wrap this dependency at all".
+   */
+  function rig(over: {
+    confirmedAs?: { value: unknown };
+    verifyAnswer?: { value: unknown };
+  }) {
+    const provider = nanoProvider(MERCHANT);
+    const confirmedAs = over.confirmedAs;
+    const rpc = confirmedAs === undefined ? provider : {
+      blockInfo: async (h: string) => {
+        const b = await provider.blockInfo(h);
+        return b === undefined ? undefined : { ...b, confirmed: confirmedAs.value } as NanoBlockInfo;
+      },
+    };
+    const verifyAnswer = over.verifyAnswer;
+    const verifier = verifyAnswer === undefined ? provider : {
+      verify: () => Promise.resolve(verifyAnswer.value as boolean),
+    };
+    const rail = nanoRail({
+      merchantAccount: MERCHANT, rpc, signer: provider, verifier, xnoPerUsd: XNO_PER_USD,
+    });
+    const toll = createTollstile({
+      rails: [rail], ledger: memoryLedger(),
+      secret: 'nano-rail-test-secret-0123456789abcdef',
+    });
+    const gate = toll.price('$1', { resource: 'GET /report' });
+    const enter = (p?: { hash?: string; signature?: string; quote?: string }) => {
+      const headers: Record<string, string> = {};
+      if (p?.hash !== undefined) headers[NANO_BLOCK_HEADER] = p.hash;
+      if (p?.signature !== undefined) headers[NANO_SIGNATURE_HEADER] = p.signature;
+      if (p?.quote !== undefined) headers[NANO_QUOTE_HEADER] = p.quote;
+      const r = new Request('https://example.test/report', { headers });
+      return gate.enter(httpContext(r, { resource: 'GET /report' }));
+    };
+    return { provider, enter };
+  }
+
+  async function present(r: ReturnType<typeof rig>, signature?: string) {
+    const challenge = await r.enter();
+    if (challenge.kind !== 'denied') throw new Error('expected a 402');
+    const { amountRaw, nonce, quote } = acceptsOf(challenge.denial);
+    const hash = r.provider.pay(amountRaw);
+    return r.enter({ hash, signature: signature ?? r.provider.sign(r.provider.payerAccount, nonce), quote });
+  }
+
+  // -- the block's confirmation ------------------------------------------------
+  //
+  // Measured against rpc.nano.to: `block_info` for a confirmed send answers
+  // `confirmed: "true"` -- a STRING. This repository documents that in
+  // `examples/rpc-network-check.mjs` and normalises it there; the rail did not.
+  // An operator who maps the field straight across hands this guard "false" for
+  // an uncemented block, and `!"false"` is false.
+
+  it('refuses a block the node reports unconfirmed as the string "false"', async () => {
+    const entry = await present(rig({ confirmedAs: { value: 'false' } }));
+    expect(entry.kind).toBe('denied');
+  });
+
+  it('does not admit a block reported unconfirmed as a string, so nothing is delivered', async () => {
+    const entry = await present(rig({ confirmedAs: { value: 'false' } }));
+    if (entry.kind !== 'denied') {
+      throw new Error('the merchant delivered on a block the network has not cemented');
+    }
+    // `proof_pending` and not `proof_invalid`: the block may yet cement, so the
+    // payer is told to come back, not that their payment was bad.
+    expect(entry.denial.error.code).toBeDefined();
+  });
+
+  it.each([['maybe'], [1], [{}], [[]], ['TRUE'], ['1']])(
+    'refuses a confirmation field that is truthy but is not a confirmation: %s',
+    async (value) => {
+      const entry = await present(rig({ confirmedAs: { value } }));
+      expect(entry.kind).toBe('denied');
+    },
+  );
+
+  // -- controls: every form that really does mean confirmed still pays --------
+
+  it('still admits a block confirmed as the boolean true', async () => {
+    const entry = await present(rig({ confirmedAs: { value: true } }));
+    expect(entry.kind).toBe('admitted');
+  });
+
+  it('still admits a block confirmed as the string "true", which is what the node sends', async () => {
+    const entry = await present(rig({ confirmedAs: { value: 'true' } }));
+    expect(entry.kind).toBe('admitted');
+  });
+
+  it.each([[false], [undefined], [null], [0], ['']])(
+    'still refuses a plainly unconfirmed block: %s',
+    async (value) => {
+      const entry = await present(rig({ confirmedAs: { value } }));
+      expect(entry.kind).toBe('denied');
+    },
+  );
+
+  // -- the signature verifier -------------------------------------------------
+  //
+  // `{ valid: false }` is what an HTTP-backed verifier answers if it hands its
+  // JSON body back un-destructured. It is truthy, so the rail admitted a payment
+  // with no valid signature -- the replay the construction guard says a verifier
+  // exists to stop: any watcher of the ledger could present someone else's
+  // confirmed send to the merchant.
+
+  it.each([[{ valid: false }], [{ ok: false }], ['false'], [1], [{}], ['yes']])(
+    'refuses a payment whose verifier answered something truthy that is not true: %s',
+    async (answer) => {
+      const entry = await present(rig({ verifyAnswer: { value: answer } }), 'a-signature-nobody-checked');
+      expect(entry.kind).toBe('denied');
+    },
+  );
+
+  it('still admits a payment whose verifier answered the boolean true', async () => {
+    const entry = await present(rig({ verifyAnswer: { value: true } }));
+    expect(entry.kind).toBe('admitted');
+  });
+
+  it.each([[false], [null], [undefined], [0]])(
+    'still refuses a payment the verifier plainly rejected: %s',
+    async (answer) => {
+      const entry = await present(rig({ verifyAnswer: { value: answer } }), 'a-signature-nobody-checked');
+      expect(entry.kind).toBe('denied');
+    },
+  );
+});

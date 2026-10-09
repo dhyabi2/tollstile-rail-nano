@@ -240,7 +240,15 @@ async function verifySignature(
       { cause: error },
     );
   }
-  return ok ? signature : null;
+  // `ok === true`, not `ok`. `NanoSignatureVerifier.verify` is declared
+  // `Promise<boolean>` and the verifier is the operator's own code, so the same
+  // runtime-shape reasoning applies as above. An HTTP-backed verifier that hands
+  // its JSON body back un-destructured answers `{ valid: false }` - truthy - and
+  // the rail admitted the payment with no valid signature at all, which is exactly
+  // the replay the construction guard above says a verifier exists to stop: any
+  // watcher of the ledger could present someone else's confirmed send to the
+  // merchant. `true` is the only answer that means yes.
+  return ok === true ? signature : null;
 }
 
 /** Price raw + this quote's nonce: the only amount that pays this quote. */
@@ -402,7 +410,28 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
       }
 
       if (block === undefined) return { status: 'invalid', reason: 'proof_invalid', proofId: hash };
-      if (!block.confirmed) return { status: 'invalid', reason: 'proof_pending', proofId: hash };
+      // `confirmed` is read for what it IS, not for whether it is truthy.
+      //
+      // `NanoBlockInfo.confirmed` is declared `boolean`, but the published package
+      // is JavaScript, so that is not enforced at runtime - the same premise the
+      // construction guards in `nanoRail` below are written under. And `rpc` is the
+      // one option `nanoRail` cannot supply, so this value comes from code the
+      // operator writes. The live node does NOT send a boolean: measured against
+      // rpc.nano.to, `block_info` for a confirmed send answers
+      // `confirmed: "true"` - a STRING, which this repository already documents in
+      // `examples/rpc-network-check.mjs` and normalises there.
+      //
+      // So an operator who maps the field straight across (`confirmed:
+      // data.confirmed`) handed this guard the string "false" for a block the
+      // network has NOT cemented, and `!"false"` is false: the block was admitted,
+      // the merchant delivered, and the charge was booked settled on a block that
+      // may never cement. Normalising here accepts both forms the node can send and
+      // refuses everything else, so no shape of this field can be mistaken for a
+      // confirmation.
+      const confirmed: unknown = block.confirmed;
+      if (confirmed !== true && confirmed !== 'true') {
+        return { status: 'invalid', reason: 'proof_pending', proofId: hash };
+      }
       if (block.destination !== merchant || block.subtype !== 'send') return { status: 'invalid', reason: 'proof_invalid', proofId: hash };
       // EXACT match, not minimum: a different quote's amount or an unrelated send
       // must not redeem this one.
