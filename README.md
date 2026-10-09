@@ -99,10 +99,12 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **29 passed**, including a rate that moves between quote and
+Rail unit tests: **34 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
-a settle actually repeated with the same key, the MCP `_meta` path, and rates given
-as strings, exponents and noisy floats.
+a settle actually repeated with the same key, the MCP `_meta` path, rates given
+as strings, exponents and noisy floats, and the confirmation and signature gates
+read for what the operator's own `rpc` and `verifier` actually answer rather than
+for whether it is truthy.
 
 **Test-network status:** not yet run end to end on a Nano test network. The
 public Test Network endpoints listed in Nano's docs (`test.nano.org`) do not
