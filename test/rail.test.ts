@@ -3,7 +3,7 @@ import { httpContext, mcpContext, railConformance } from 'tollstile/testing';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { nanoProvider } from '../src/nano-provider.js';
-import { nanoRail, parseRate, toRaw } from '../src/nano-rail.js';
+import { nanoRail, parseRate, toRaw, type NanoData } from '../src/nano-rail.js';
 import { harness } from './harness.js';
 import type { NanoBlockInfo, NanoSigner } from '../src/nano-types.js';
 import {
@@ -1066,4 +1066,94 @@ describe('the rail reads its injected dependencies for what they are, not for tr
       expect(entry.kind).toBe('denied');
     },
   );
+});
+
+describe('lookup reads the block confirmation for what it is, like verify does', () => {
+  // `verify` was put on an exact read in #18. `lookup` kept `!block.confirmed`, and
+  // `lookup` is the read core COMES BACK to: a charge left `unknown` (a refund whose
+  // send could not be confirmed, a reconciliation pass) is resolved by asking the rail
+  // again. Answering `settled` there books the payment with no further check.
+  //
+  // Measured against rpc.nano.to: `block_info` for a confirmed send answers
+  // `confirmed: "true"` -- a STRING. `examples/rpc-network-check.mjs` documents and
+  // normalises exactly that. An operator who maps the field straight across
+  // (`confirmed: data.confirmed`) hands this line `"false"` for an uncemented block,
+  // and `!"false"` is false.
+
+  const PAID: NanoBlockInfo = {
+    hash: 'FAIL_0000000000000000000000000000000000000000000000000000000001',
+    confirmed: true,
+    source: 'nano_1fakepayer0000000000000000000000000000000000000000000000000',
+    destination: MERCHANT,
+    amountRaw: '10000000000000000000000000000',
+    subtype: 'send',
+  };
+
+  /** The rail with an rpc that answers the one block, with `confirmed` set to `value`. */
+  function railWithConfirmed(value: unknown) {
+    const provider = nanoProvider(MERCHANT);
+    return nanoRail({
+      merchantAccount: MERCHANT,
+      rpc: { blockInfo: () => Promise.resolve({ ...PAID, confirmed: value } as NanoBlockInfo) },
+      signer: provider,
+      verifier: provider,
+      xnoPerUsd: XNO_PER_USD,
+    });
+  }
+
+  const authorization = {
+    data: {
+      hash: PAID.hash,
+      source: PAID.source,
+      destination: PAID.destination,
+      amountRaw: PAID.amountRaw,
+      quoteId: 'q_1',
+    },
+  };
+
+  /** The rail seen through the one method under test. `lookup` takes
+   * (authorization, charge, operation) and this one reads only the first. */
+  type LookupOnly = { lookup(a: { readonly data: NanoData }): Promise<{ status: string }> };
+
+  function lookupWith(value: unknown) {
+    const rail = railWithConfirmed(value) as unknown as LookupOnly;
+    return rail.lookup(authorization);
+  }
+
+  it('does not report a block the node calls unconfirmed as the string "false" as settled', async () => {
+    const result = await lookupWith('false');
+    expect(result.status, 'an uncemented block was reconciled as a settled payment').toBe('none');
+  });
+
+  it.each([['maybe'], [1], [{}], [[]], ['TRUE'], ['1']])(
+    'does not report a confirmation field that is truthy but is not a confirmation as settled: %s',
+    async (value) => {
+      expect((await lookupWith(value)).status).toBe('none');
+    },
+  );
+
+  // -- controls: what really does mean confirmed is still reconciled as settled ----
+
+  it.each([[true], ['true']])('still reports a confirmed block as settled: %s', async (value) => {
+    expect((await lookupWith(value)).status).toBe('settled');
+  });
+
+  it.each([[false], [undefined], [null], [0], ['']])(
+    'still reports a plainly unconfirmed block as none: %s',
+    async (value) => {
+      expect((await lookupWith(value)).status).toBe('none');
+    },
+  );
+
+  it('still reports a block the node has never heard of as none', async () => {
+    const provider = nanoProvider(MERCHANT);
+    const rail = nanoRail({
+      merchantAccount: MERCHANT,
+      rpc: { blockInfo: () => Promise.resolve(undefined) },
+      signer: provider,
+      verifier: provider,
+      xnoPerUsd: XNO_PER_USD,
+    });
+    expect((await (rail as unknown as LookupOnly).lookup(authorization)).status).toBe('none');
+  });
 });
