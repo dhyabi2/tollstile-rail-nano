@@ -515,7 +515,17 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
           throw providerError(`block_info ${data.hash}`, error);
         }
       }
-      if (block === undefined || !block.confirmed) return { status: 'none' };
+      // `confirmed` is read for what it IS, exactly as `verify` reads it above, and
+      // for the same measured reason: the live node answers `confirmed: "true"` as a
+      // STRING, so an operator who maps the field straight across hands this line the
+      // string `"false"` for a block the network has NOT cemented -- and `!"false"` is
+      // false. `verify` was fixed in #18; this read was left on truthiness, and it is
+      // the one core comes back to. `lookup` is how a charge in `unknown` is
+      // reconciled, so saying `settled` here books the payment with no further check:
+      // the same uncemented-block-reported-as-paid outcome #18 closed, reached through
+      // reconciliation instead of through the gate.
+      const confirmed: unknown = block?.confirmed;
+      if (block === undefined || (confirmed !== true && confirmed !== 'true')) return { status: 'none' };
       return { status: 'settled', reference: data.hash, details: { to: data.destination, amountRaw: data.amountRaw } };
     },
 
