@@ -889,17 +889,29 @@ describe('nano rail', () => {
     expect(affected![1], 'the README lists this version as affected').not.toContain(pkg.version);
   });
 
-  it('the conformance result the README publishes is the result this suite produces', () => {
+  it('the conformance result the README publishes is the result this suite produces', (ctx) => {
     // The README tells a Tollstile maintainer to run `npm test` and compare
     // against a printed number, so that number is a claim about this suite and
     // goes stale every time a case is added -- it has now been wrong twice, at
     // 15 and at 17. Counting the cases here means the suite that changes is the
     // suite that reports the mismatch. This test counts itself.
+    //
+    // The count comes from the runner's own collected tasks, NOT from matching
+    // `^\s*it\(` in the source. That regex counts `it(` LINES, and an
+    // `it.each([...])` block is one line and many cases: by 0.3.2 this file held
+    // seven of them, so the regex said 36 while `npm test` printed 70 -- and the
+    // law whose whole purpose is to catch a stale published number reported no
+    // mismatch, through two audits that added `it.each` cases. Walking
+    // `ctx.task.file.tasks` counts the leaf tests the runner will actually run,
+    // which is what the README's number claims to be.
     const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
-    const countIts = (file: string): number =>
-      (readFileSync(new URL(file, import.meta.url), 'utf8').match(/^\s*it\(/gm) ?? []).length;
+    const countCases = (tasks: readonly unknown[]): number =>
+      tasks.reduce<number>((n, entry) => {
+        const task = entry as { type?: string; tasks?: readonly unknown[] };
+        return n + (task.type === 'test' ? 1 : 0) + (task.tasks === undefined ? 0 : countCases(task.tasks));
+      }, 0);
 
-    const rail = countIts('./rail.test.ts');
+    const rail = countCases(ctx.task.file.tasks);
     const cases = railConformance(harness);
     const skipped = cases.filter((c) => c.skip !== undefined).length;
     const conformance = cases.length - skipped;
