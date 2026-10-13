@@ -387,7 +387,14 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
   const configured: unknown = options.merchantAccount;
   const merchant = nanoAccount(configured);
   if (merchant === null) {
-    throw new TollstileError('CONFIG_INVALID', `nanoRail needs merchantAccount to be a Nano address exactly as the network writes it (nano_ or xrb_, then 60 base32 characters starting with 1 or 3, a valid checksum, no surrounding whitespace); got ${JSON.stringify(configured)}. verify() compares it to the destination the node reports, so anything else refuses every payment after it has confirmed on-chain.`);
+    // JSON.stringify throws on a BigInt or a cycle; the refusal must still be CONFIG_INVALID.
+    let shown: string;
+    try {
+      shown = JSON.stringify(configured) ?? String(configured);
+    } catch {
+      shown = typeof configured;
+    }
+    throw new TollstileError('CONFIG_INVALID', `nanoRail needs merchantAccount to be a Nano address exactly as the network writes it (nano_ or xrb_, then 60 base32 characters starting with 1 or 3, a valid checksum, no surrounding whitespace); got ${shown}. verify() compares it to the destination the node reports, so anything else refuses every payment after it has confirmed on-chain.`);
   }
   const rpc = options.rpc;
   const verifier = options.verifier;
@@ -498,7 +505,11 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
       if (confirmed !== true && confirmed !== 'true') {
         return { status: 'invalid', reason: 'proof_pending', proofId: hash };
       }
-      if (block.destination !== merchant || block.subtype !== 'send') return { status: 'invalid', reason: 'proof_invalid', proofId: hash };
+      // The same normalisation as the configured side: a node or adapter that names
+      // the destination `xrb_` is naming the same key. A non-string never matches.
+      const destination: unknown = block.destination;
+      const reported = typeof destination === 'string' && destination.startsWith('xrb_') ? `nano_${destination.slice(4)}` : destination;
+      if (reported !== merchant || block.subtype !== 'send') return { status: 'invalid', reason: 'proof_invalid', proofId: hash };
       // EXACT match, not minimum: a different quote's amount or an unrelated send
       // must not redeem this one.
       if (block.amountRaw !== expectedRaw) return { status: 'invalid', reason: 'proof_invalid', proofId: hash };
