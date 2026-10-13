@@ -112,10 +112,14 @@ async function currentRate(rate: NanoRailOptions['xnoPerUsd']): Promise<Decimal>
  * certainty. The binding does not rest on it: a block hash is single-use in core's
  * ledger, and the payer must sign this quote's nonce with the key that sent the
  * block. The amount only makes a stray or old send unlikely to fit a new quote.
+ *
+ * Only the LAST 8 BYTES of the digest are reduced, exactly as 0.3.1 did. Reducing
+ * the whole digest gives a different nonce for every quote id, so a quote issued
+ * before an upgrade could never be paid after it. Pinned in the tests (q_1).
  */
 function nonceIntOf(quote: Quote): bigint {
   const digest = createHash('sha256').update(quote.id).digest();
-  return BigInt(`0x${digest.toString('hex')}`) % NONCE_MODULUS;
+  return digest.readBigUInt64BE(digest.length - 8) % NONCE_MODULUS;
 }
 
 function rawFromHeader(context: Context): string | null {
@@ -268,6 +272,87 @@ function payableOf(quote: Quote): string {
 }
 
 /**
+ * Thrown by a refund signer's `sendFor` ONLY when it knows that nothing was
+ * broadcast for this refund: it failed before any `process` RPC was attempted
+ * (for example reading `account_info`, generating work, or signing). The rail
+ * then forgets the attempt, so the next `refund` (e.g. from `reconcile()`) sends
+ * it again. Every other failure is treated as possibly published and is not
+ * re-sent until the operator calls `forgetRefund(hash)`.
+ *
+ * Do NOT throw it for a socket error, a timeout, or a failed confirmation poll:
+ * an error code describes the last connection attempt, not whether an earlier
+ * attempt published the block. Never throw it from a `sendFor` that made ANY
+ * `process` attempt for this refund: a retrying signer whose last attempt failed
+ * before broadcast cannot know an earlier attempt did not publish.
+ *
+ * The rail recognises it by brand, not `instanceof`, so it still works when the
+ * signer imports a different copy of this package: `name === 'RefundNotSentError'`
+ * and `notBroadcast === true`.
+ */
+export class RefundNotSentError extends Error {
+  readonly notBroadcast = true as const;
+  constructor(message = 'The refund send failed before anything was broadcast.', options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'RefundNotSentError';
+  }
+}
+
+/** The brand check for RefundNotSentError. Total: a hostile error object cannot make it throw. */
+function isRefundNotSent(error: unknown): boolean {
+  try {
+    if (typeof error !== 'object' || error === null) return false;
+    const branded = error as { name?: unknown; notBroadcast?: unknown };
+    return branded.name === 'RefundNotSentError' && branded.notBroadcast === true;
+  } catch {
+    return false;
+  }
+}
+
+/** A Nano block hash: exactly 64 hex digits, either case. */
+const BLOCK_HASH = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * The reverse send's reference from what `sendFor` resolved to, upper-cased, or
+ * null. Only a 64-hex block hash is a reference: a signer that hands back raw RPC
+ * text such as '{"error":"Fork"}' did not name a send, and must not book the
+ * charge refunded. A JavaScript signer that returns the RPC body un-destructured,
+ * `{ block: '<hash>' }` (nano's `process`) or `{ hash: '<hash>' }`, worked in
+ * 0.3.1, so exactly those two shapes are accepted too. Anything else is null.
+ */
+function referenceOf(value: unknown): string | null {
+  if (typeof value === 'string') return BLOCK_HASH.test(value) ? value.toUpperCase() : null;
+  try {
+    if (typeof value !== 'object' || value === null) return null;
+    const body = value as { block?: unknown; hash?: unknown };
+    for (const candidate of [body.block, body.hash]) {
+      if (typeof candidate === 'string' && BLOCK_HASH.test(candidate)) return candidate.toUpperCase();
+    }
+  } catch {
+    // A hostile object: no reference.
+  }
+  return null;
+}
+
+/** What this rail instance knows about the reverse send for one payment hash. */
+type RefundEntry =
+  | { readonly state: 'in_flight' }
+  | { readonly state: 'sent'; readonly reference: string }
+  | { readonly state: 'failed' };
+
+/** The Nano rail: a Tollstile rail plus the operator's escape hatch for a failed refund. */
+export type NanoRail = ReturnType<typeof createRail<'nano', NanoData>> & {
+  /**
+   * Forget a refund whose send FAILED in this process, so the next `refund`
+   * (e.g. from `reconcile()`) sends it again. Call it only after checking the
+   * merchant account's history and finding no send to the payer for this
+   * payment: the failed send may have been published with only its reply lost.
+   * Returns true when a failed entry was removed. A refund that was sent or is
+   * still in flight is never forgotten (returns false), nor is an unknown hash.
+   */
+  forgetRefund(hash: string): boolean;
+};
+
+/**
  * A Nano (XNO) settlement rail for Tollstile.
  *
  * Flow `upfront`: the payer's confirmed `send` block is the payment and it has
@@ -291,7 +376,7 @@ function payableOf(quote: Quote): string {
  *      a merchant that wants to append to its own ledger does so from core's
  *      `onEvent` (fires once, after the single-use check).
  */
-export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail<'nano', NanoData>> {
+export function nanoRail(options: NanoRailOptions): NanoRail {
   // Fail closed at construction: without a verifier a watcher could replay any
   // confirmed send to the merchant, and refusing at verify would be after the
   // money moved. So the requirement is structural, not a late check.
@@ -325,8 +410,14 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
   const merchant = options.merchantAccount;
   const rpc = options.rpc;
   const verifier = options.verifier;
+  /**
+   * Per payment hash: the state of this instance's reverse send. In memory only,
+   * and never pruned: one small entry per refunded payment for the life of the
+   * rail instance (see README, "Refund limits").
+   */
+  const refunds = new Map<string, RefundEntry>();
 
-  return createRail<'nano', NanoData>({
+  const rail = createRail<'nano', NanoData>({
     name: 'nano',
     livemode: true,
     capabilities: {
@@ -496,17 +587,76 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
       // genuinely UNKNOWN -- the block may have been published and only the reply
       // lost -- so it is reported as unavailable, never as `rejected`, which would
       // assert the money did not move and risk a second reverse send.
-      let reference: string;
-      try {
-        reference = await signer.sendFor(data.source, data.amountRaw, { refundOf: data.hash });
-      } catch (error) {
-        throw providerError(`the refund send for ${data.hash}`, error);
+      //
+      // That `unknown` is also what reconcile comes back to, and `lookup` sees the
+      // payer's block still confirmed and answers `settled`, so core calls `refund`
+      // AGAIN. Sending again there is a second reverse send of the same money
+      // whenever the first was published and only its reply was lost. So a payment
+      // gets at most one `sendFor` from this rail: a send that returned is answered
+      // from `refunds` (and `lookup` reports it), and a send that threw stays
+      // unknown for the operator to check against the merchant account, not
+      // re-sent automatically (the exceptions are below). `refunds` lives with this rail instance; a reconcile run from a
+      // fresh process relies on the signer honouring `refundOf`.
+      //
+      // Every refund call therefore checks `refunds` for the hash before sending:
+      //   in_flight -> a send for this payment is running now (core's provider
+      //                timeout fired, or complete() raced reconcile): refused with
+      //                its own error, never a second send;
+      //   sent      -> answered `refunded` with the recorded reference;
+      //   failed    -> the send may have been published; refused until the operator
+      //                has checked the account and called `forgetRefund(hash)`.
+      // The one failure that is retried on its own is a RefundNotSentError: the
+      // signer stating that nothing was broadcast. The entry is removed so the next
+      // reconcile sends it. Socket error codes are NOT read: they describe only the
+      // last connection attempt, and a retrying client or a confirmation poll can
+      // fail with ECONNREFUSED after the block was published.
+      //
+      // The map key is the canonical (upper-case) hash, so an authorization stored
+      // with a lower-case hash by 0.3.1 matches the hash `forgetRefund` is given.
+      if (typeof data.hash !== 'string' || data.hash === '') {
+        throw new TollstileError('PROVIDER_UNAVAILABLE', 'The authorization has no payment block hash to refund; nothing was sent. Check the ledger row for this charge.');
       }
+      const key = canonicalHash(data.hash);
+      const earlier = refunds.get(key);
+      if (earlier !== undefined) {
+        if (earlier.state === 'sent') return { status: 'refunded', reference: earlier.reference };
+        if (earlier.state === 'in_flight') {
+          throw new TollstileError('PROVIDER_UNAVAILABLE', `A refund send for ${key} is already in flight in this process; it is not sent again. Reconcile again once it has finished.`);
+        }
+        throw new TollstileError('PROVIDER_UNAVAILABLE', `The refund send for ${key} failed earlier and may have been published; it is not sent again automatically. Check the merchant account for a send of ${data.amountRaw} raw to ${data.source}; if there is none, call rail.forgetRefund('${key}') and reconcile again.`);
+      }
+      refunds.set(key, { state: 'in_flight' });
+      let result: unknown;
+      try {
+        result = await signer.sendFor(data.source, data.amountRaw, { refundOf: data.hash });
+      } catch (error) {
+        // Kept total: `isRefundNotSent` cannot throw, so the entry never stays
+        // `in_flight` after the send has settled.
+        if (isRefundNotSent(error)) {
+          refunds.delete(key);
+          throw providerError(`the refund send for ${key} (nothing was broadcast; it is retried)`, error);
+        }
+        refunds.set(key, { state: 'failed' });
+        throw new TollstileError('PROVIDER_UNAVAILABLE', `The refund send for ${key} failed and may have been published; it is not sent again automatically. Check the merchant account for a send of ${data.amountRaw} raw to ${data.source}; if there is none, call rail.forgetRefund('${key}') and reconcile again.`, { cause: error });
+      }
+      // `sendFor` is declared to return the send's hash, but it is the operator's
+      // code (see the verifier above): `undefined`, or a JSON body handed back
+      // un-destructured, means a send whose outcome we cannot name. It is treated
+      // as a failure that may have been published, never as a reason to send again.
+      // (`referenceOf` accepts the two RPC-body shapes 0.3.1 tolerated.)
+      const reference = referenceOf(result);
+      if (reference === null) {
+        refunds.set(key, { state: 'failed' });
+        throw new TollstileError('PROVIDER_UNAVAILABLE', `The refund send for ${key} returned no block hash, so it may have been published; it is not sent again automatically. Check the merchant account for a send of ${data.amountRaw} raw to ${data.source}; if there is none, call rail.forgetRefund('${key}') and reconcile again.`);
+      }
+      refunds.set(key, { state: 'sent', reference });
       return { status: 'refunded', reference };
     },
 
     async lookup(authorization: Authorization & { data: NanoData }): Promise<LookupResult> {
       const data = authorization.data;
+      const refunded = typeof data.hash === 'string' ? refunds.get(canonicalHash(data.hash)) : undefined;
+      if (refunded?.state === 'sent') return { status: 'refunded', reference: refunded.reference };
       const block = await readBlock();
       async function readBlock(): Promise<NanoBlockInfo | undefined> {
         try {
@@ -540,6 +690,15 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
       // block facts lookup/refund need.
       const { signature: _signature, ...rest } = data;
       return rest;
+    },
+  });
+
+  return Object.assign(rail, {
+    forgetRefund(hash: string): boolean {
+      if (typeof hash !== 'string') return false;
+      const key = canonicalHash(hash);
+      if (refunds.get(key)?.state !== 'failed') return false;
+      return refunds.delete(key);
     },
   });
 }
