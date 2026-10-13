@@ -29,9 +29,9 @@ let settledHashes: string[] = [];
 type TollstileEvent = Parameters<NonNullable<Parameters<typeof createTollstile>[0]['onEvent']>>[0];
 type Entry = Awaited<ReturnType<ReturnType<typeof setup>['enter']>>;
 
-function setup(signer?: NanoSigner, merchantAccount: string = MERCHANT) {
-  // The fake network always names the merchant `nano_`, as a real node does.
-  const provider = nanoProvider(MERCHANT);
+function setup(signer?: NanoSigner, merchantAccount: string = MERCHANT, networkAccount: string = MERCHANT) {
+  // The fake network names the merchant `networkAccount` (`nano_`, as a real node does, by default).
+  const provider = nanoProvider(networkAccount);
   settledHashes = [];
   const seen = new Set<string>();
   const rail = nanoRail({
@@ -189,6 +189,40 @@ describe('nano rail', () => {
     const paid = await payAndEnter(enter, provider);
     if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
     expect(paid.kind).toBe('admitted');
+  });
+
+  it('compares a destination the network names xrb_ on the same normalisation', async () => {
+    // An adapter (or the /testing nanoProvider) may report the destination as
+    // `xrb_`. That is the same key, so it must be admitted whichever prefix the
+    // merchant configured - and a different key must still be refused.
+    const XRB = MERCHANT.replace('nano_', 'xrb_');
+    for (const [configured, network] of [[XRB, XRB], [MERCHANT, XRB]] as const) {
+      const { enter, provider } = setup(undefined, configured, network);
+      const paid = await payAndEnter(enter, provider);
+      if (paid.kind !== 'admitted') throw new Error(`${configured} / ${network}: expected admission, got ${paid.denial.error.code}`);
+      expect(paid.kind).toBe('admitted');
+    }
+    const OTHER = 'xrb_1banexkcfuieufzxksfrxqf6xy8e57ry1zdtq9yn7jntzhpwu4pg4hajojmq';
+    const { enter, provider } = setup(undefined, MERCHANT, OTHER);
+    const refused = await payAndEnter(enter, provider);
+    expect(refused.kind).toBe('denied');
+  });
+
+  it('refuses with CONFIG_INVALID a merchantAccount JSON cannot print', () => {
+    const provider = nanoProvider(MERCHANT);
+    const base = { rpc: provider, signer: provider, verifier: provider, xnoPerUsd: XNO_PER_USD };
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    for (const bad of [1n, circular]) {
+      let caught: unknown;
+      try {
+        nanoRail({ ...base, merchantAccount: bad as never });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(TollstileError);
+      expect((caught as TollstileError).code).toBe('CONFIG_INVALID');
+    }
   });
 
   it('refuses at construction a merchantAccount whose checksum does not match', () => {

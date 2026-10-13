@@ -64,14 +64,15 @@ response." One trailing newline does it, and the install snippet below reads the
 value from `process.env`, where a newline is exactly what you get. `nanoRail()`
 now throws `CONFIG_INVALID` unless it is `nano_`/`xrb_` plus 60 base32 characters
 whose first is `1` or `3`, with nothing around them, **and** its checksum matches:
-the last 8 characters are BLAKE2b (5-byte digest) of the public key, computed by a
+the last 8 characters are BLAKE2b (5-byte digest, bytes reversed) of the public key, computed by a
 small dependency-free BLAKE2b in `src/blake2b.ts` (`node:crypto` only offers the
 64-byte digest), so a mistyped character is refused at boot. An `xrb_` account is
 the legacy spelling of the same key; nodes name destinations `nano_`, so the rail
-rewrites it to `nano_` (same 60 characters) and publishes and compares that.
+rewrites it to `nano_` (same 60 characters) and publishes and compares that; a
+destination the node reports as `xrb_` is compared the same way.
 
 If you use the `tollstile-rail-nano/testing` export in your own tests, fixtures
-must now use a well-formed `nano_` address with a valid checksum: construction
+must now use a well-formed `nano_` (or `xrb_`) address with a valid checksum: construction
 refuses anything else.
 
 ## Rate
@@ -118,7 +119,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **74 passed**, including a rate that moves between quote and
+Rail unit tests: **76 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, rates given
 as strings, exponents and noisy floats, and the confirmation and signature gates
