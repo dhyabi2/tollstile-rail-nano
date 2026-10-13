@@ -42,7 +42,7 @@ to search the merchant's account for a reverse send.
 **`dhyabi2/tollstile-rail-nano#21` already fixes it** ("Fix 0.3.2 release blockers: empty npm
 package, nonce regression, double refund on reconcile", opened 2026-10-13 05:27Z), and more
 thoroughly than the documentation-only change this run had prepared: an in-process refund record
-(`in_flight` / `failed` / `sent`), a `RefundNotBroadcast` error for the one case that is safe to
+(`in_flight` / `failed` / `sent`), a `RefundNotSentError` (branded `notBroadcast === true`) for the one case that is safe to
 retry automatically, `forgetRefund(hash)` as the operator's escape hatch, and the `refundOf`
 idempotency requirement stated in the README. The branch prepared here
 (`fix/refund-retry-idempotency`) is superseded by it and **no pull request was opened for it**;
@@ -65,9 +65,12 @@ single-use in core's ledger) really is a usable idempotency key for that cross-p
 
 ## Note on reconciliation tests, for whoever writes the next one
 
-`reconcile` reads charges last updated **before** `now - olderThanMs`, and the ledger stamps
-`updatedAt` from the system clock. At `olderThanMs: 0` a charge written in the same millisecond as
-the call falls outside the window and is never examined - a test built that way passes alone and
-fails in the full file. A negative window (`olderThanMs: -1_000`) puts the boundary just after the
-charge. A `fakeClock` does **not** work: the ledger's `updatedAt` is real time, so a fake
-`runtime.clock` puts the window decades before the charge and nothing is examined at all.
+`reconcile` reads charges last updated strictly **before** `now - olderThanMs`, and core stamps
+`updatedAt` from `runtime.clock.now()` - the clock passed to `createTollstile`, or the system clock
+when none is. At `olderThanMs: 0` a charge written in the same millisecond as the call falls
+outside the window and is never examined - a test built that way passes alone and fails in the
+full file. Two setups do work. A `fakeClock` passed to `createTollstile({ clock: fakeClock() })`
+stamps the ledger with the same fake time, so advancing it past the window (`clock.advance(60_000)`
+then `reconcile({ olderThanMs: 1_000 })`) examines the charge deterministically; without the
+advance, nothing is examined. On the real clock, a negative window (`olderThanMs: -1_000`) puts the
+boundary just after the charge.
