@@ -112,10 +112,14 @@ async function currentRate(rate: NanoRailOptions['xnoPerUsd']): Promise<Decimal>
  * certainty. The binding does not rest on it: a block hash is single-use in core's
  * ledger, and the payer must sign this quote's nonce with the key that sent the
  * block. The amount only makes a stray or old send unlikely to fit a new quote.
+ *
+ * Only the LAST 8 BYTES of the digest are reduced, exactly as 0.3.1 did. Reducing
+ * the whole digest gives a different nonce for every quote id, so a quote issued
+ * before an upgrade could never be paid after it. Pinned in the tests (q_1).
  */
 function nonceIntOf(quote: Quote): bigint {
   const digest = createHash('sha256').update(quote.id).digest();
-  return BigInt(`0x${digest.toString('hex')}`) % NONCE_MODULUS;
+  return digest.readBigUInt64BE(digest.length - 8) % NONCE_MODULUS;
 }
 
 function rawFromHeader(context: Context): string | null {
@@ -325,6 +329,8 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
   const merchant = options.merchantAccount;
   const rpc = options.rpc;
   const verifier = options.verifier;
+  /** Per payment hash: the reverse send's hash, or null while a send's outcome is unknown. */
+  const refunds = new Map<string, string | null>();
 
   return createRail<'nano', NanoData>({
     name: 'nano',
@@ -496,17 +502,36 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
       // genuinely UNKNOWN -- the block may have been published and only the reply
       // lost -- so it is reported as unavailable, never as `rejected`, which would
       // assert the money did not move and risk a second reverse send.
+      //
+      // That `unknown` is also what reconcile comes back to, and `lookup` sees the
+      // payer's block still confirmed and answers `settled`, so core calls `refund`
+      // AGAIN. Sending again there is a second reverse send of the same money
+      // whenever the first was published and only its reply was lost. So a payment
+      // gets at most one `sendFor` from this rail: a send that returned is answered
+      // from `refunds` (and `lookup` reports it), and a send that threw stays
+      // unknown for the operator to check against the merchant account, never
+      // re-sent. `refunds` lives with this rail instance; a reconcile run from a
+      // fresh process relies on the signer honouring `refundOf`.
+      const earlier = refunds.get(data.hash);
+      if (typeof earlier === 'string') return { status: 'refunded', reference: earlier };
+      if (earlier === null) {
+        throw new TollstileError('PROVIDER_UNAVAILABLE', `The refund send for ${data.hash} failed earlier and may have been published; it is not sent again. Check the merchant account for a send to ${data.source}.`);
+      }
+      refunds.set(data.hash, null);
       let reference: string;
       try {
         reference = await signer.sendFor(data.source, data.amountRaw, { refundOf: data.hash });
       } catch (error) {
         throw providerError(`the refund send for ${data.hash}`, error);
       }
+      refunds.set(data.hash, reference);
       return { status: 'refunded', reference };
     },
 
     async lookup(authorization: Authorization & { data: NanoData }): Promise<LookupResult> {
       const data = authorization.data;
+      const refunded = refunds.get(data.hash);
+      if (typeof refunded === 'string') return { status: 'refunded', reference: refunded };
       const block = await readBlock();
       async function readBlock(): Promise<NanoBlockInfo | undefined> {
         try {

@@ -26,6 +26,12 @@ money has already moved on-chain and the merchant keeps it. If you need a failed
 call to give the money back, configure a `signer`; if you cannot, that behavior is
 a deliberate choice, not a bug — make sure it is what your terms say.
 
+The rail sends **at most one** reverse send per payment. If `sendFor` throws, the
+send may still have been published, so the charge is left `unknown` and is not
+sent again by `reconcile()` from the same process: check the merchant account
+for it. Make `sendFor` idempotent on `context.refundOf` if reconciliation can run
+in another process.
+
 ## Proof is bound to the purchase and its payer
 
 Because Nano blocks are public and have no memo field, a payment proof must be
@@ -34,7 +40,7 @@ tied to the specific purchase to be safe (Tollstile#47 and #49 reviews):
 1. **Exact amount per quote.** The payable amount is the quoted price in raw plus
    a per-quote nonce. The price is rounded down to a multiple of 10^10 raw
    (under 1e-20 XNO) so it occupies the high digits, and the nonce — SHA-256 of
-   the quote id, reduced below 10^10 — the low 10 digits. **That nonce is ~33
+   the quote id, its last 8 bytes reduced below 10^10 — the low 10 digits. **That nonce is ~33
    bits: it makes two quotes' amounts differ with high probability, not with
    certainty.** It is not what makes a proof safe. `verify` accepts only an
    **exact** match, and reads the payable amount from the nano offer the quote
@@ -99,7 +105,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **70 passed**, including a rate that moves between quote and
+Rail unit tests: **73 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, rates given
 as strings, exponents and noisy floats, and the confirmation and signature gates

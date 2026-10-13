@@ -1169,3 +1169,83 @@ describe('lookup reads the block confirmation for what it is, like verify does',
     expect((await (rail as unknown as LookupOnly).lookup(authorization)).status).toBe('none');
   });
 });
+
+describe('the per-quote nonce is the one 0.3.1 issued', () => {
+  // 0.3.1 folded the LAST 8 BYTES of sha256(quote.id) below 10^10. 0.3.2 had
+  // switched to the whole digest mod 10^10, which changes every quote's payable
+  // amount: for quote id `q_1` that is 583611271 instead of 8247539591, so a quote
+  // a 0.3.1 server issued before an upgrade can never be paid after it. The value
+  // is pinned from the published 0.3.1 `dist/nano-rail.js`, not from this source.
+  type ChallengeOnly = {
+    challenge(quote: unknown, token: string, offer: unknown): Promise<{ accepts: { amountRaw: string } }>;
+  };
+
+  it.each([['q_1', '8247539591']])('quote id %s carries nonce %s on a zero price', async (id, nonce) => {
+    const provider = nanoProvider(MERCHANT);
+    const rail = nanoRail({ merchantAccount: MERCHANT, rpc: provider, signer: provider, verifier: provider, xnoPerUsd: XNO_PER_USD });
+    const challenge = await (rail as unknown as ChallengeOnly).challenge(
+      { id, nonce: 'n' },
+      'token',
+      { details: { to: MERCHANT, amountRaw: '0' } },
+    );
+    expect(challenge.accepts.amountRaw).toBe(nonce);
+  });
+});
+
+describe('a refund is sent at most once per payment', () => {
+  // A failed reverse send is reported PROVIDER_UNAVAILABLE so the charge parks in
+  // `unknown` (#17). But `unknown` is exactly what reconcile comes back to: it asks
+  // `lookup`, which sees the payer's block still confirmed and answers `settled`,
+  // so core calls `refund` again. If the first send was published and only its
+  // reply was lost, that second call is a second reverse send of the same money.
+
+  it('a refund send whose reply was lost is not sent again by reconcile', async () => {
+    const provider = nanoProvider(MERCHANT);
+    let calls = 0;
+    // `provider` stands for the merchant's signing node and counts its sends;
+    // `network` is the ledger the payer pays on.
+    const { provider: network, enter, toll, ledger } = setup({
+      async sendFor(destination, amountRaw, context) {
+        calls += 1;
+        const hash = await provider.sendFor(destination, amountRaw, context);
+        // The block went out; the reply did not come back.
+        if (calls === 1) throw new Error(`socket reset after publishing ${hash}`);
+        return hash;
+      },
+    });
+    const paid = await payAndEnter(enter, network);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+
+    await paid.pass.complete('failed');
+    expect(ledger.charges()[0].payment).toBe('unknown');
+    expect(provider.refundCount()).toBe(1);
+
+    // The memory ledger reconciles charges updated strictly BEFORE now - olderThanMs.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const round = await toll.reconcile({ olderThanMs: 0 });
+    expect(round.examined, 'reconcile did not pick the charge up').toBe(1);
+    expect(provider.refundCount(), 'reconcile sent a second reverse send').toBe(1);
+    // Still owed an answer, not booked as refunded: the rail cannot see that send.
+    expect(ledger.charges()[0].payment).toBe('unknown');
+  });
+
+  it('a refund that was sent is reported refunded when core asks again', async () => {
+    const { provider, enter, rail, ledger } = setup();
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+    await paid.pass.complete('failed');
+    const [charge] = ledger.charges();
+    expect(charge.payment).toBe('refunded');
+    expect(provider.refundCount()).toBe(1);
+
+    const authorization = (await ledger.getAuthorization(charge.authorizationId))!;
+    type Again = {
+      refund(a: unknown, c: unknown): Promise<{ status: string; reference?: string }>;
+      lookup(a: unknown, c: unknown): Promise<{ status: string; reference?: string }>;
+    };
+    const again = rail as unknown as Again;
+    expect(await again.refund(authorization, charge)).toEqual({ status: 'refunded', reference: charge.refundReference });
+    expect(await again.lookup(authorization, charge)).toEqual({ status: 'refunded', reference: charge.refundReference });
+    expect(provider.refundCount(), 'a second reverse send').toBe(1);
+  });
+});
