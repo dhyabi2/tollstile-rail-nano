@@ -105,11 +105,17 @@ boundary — and compared every one against Python's `hashlib.blake2b(..., diges
 refused at boot, and both real live-network addresses this repository already carries
 (`nano_3nhh9…`, `nano_1banex…`) validate.
 
-Branch total: **81 passed, 2 skipped**; lint, typecheck and build clean.
+A third commit, `10acf7c`, closes the mirror of the same hole from the other side: a node
+that names the *destination* `xrb_` was refused after the payment, because the compare was
+still exact against a `nano_` merchant. Same root cause, read in the other direction.
+
+Branch total: **83 passed, 2 skipped**; lint, typecheck and build clean on the merged tree.
 
 The lesson worth copying: a guard that refuses a bad value is only half of it. The test has
 to carry the value all the way to the decision it protects — my `xrb_` case asserted
-`not.toThrow()` at construction when it should have asserted a payment was *admitted*.
+`not.toThrow()` at construction when it should have asserted a payment was *admitted*. And
+an exact string compare between two spellings of the same account needs normalising on
+**both** sides; I fixed neither, and treated the config side as settled.
 
 ## Could not verify
 
