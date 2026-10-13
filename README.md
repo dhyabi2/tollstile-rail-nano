@@ -28,15 +28,24 @@ a deliberate choice, not a bug — make sure it is what your terms say.
 
 Within one rail instance the rail sends **at most one** reverse send per
 payment. If `sendFor` throws, or resolves to anything other than a block hash
-string, the send may still have been published, so the charge is left `unknown`
-and is not sent again by `reconcile()`. Check the merchant account history; if
-no send to the payer is there, call `rail.forgetRefund(paymentHash)` and the
-next reconcile sends it once. `forgetRefund` never clears a refund that was sent
-or is still in flight. The one failure retried on its own is a connection that
-was never made (error code, or a `cause` code, of `ECONNREFUSED`, `ENOTFOUND` or
-`EAI_AGAIN`); a timeout or `ECONNRESET` is not retried. A second refund for a
-payment whose send is still running is refused with its own "already in flight"
-error.
+string (or `{ block }` / `{ hash }` holding a 64-hex hash), the send may still have been published, so the charge is left `unknown`
+and is not sent again by `reconcile()`. A socket error code (`ECONNREFUSED`,
+`ENOTFOUND`, a timeout) does not change that: it describes the last connection
+attempt, not whether an earlier attempt or a confirmation poll came after a
+published block. A second refund for a payment whose send is still running is
+refused with its own "already in flight" error.
+
+- **Operators:** check the merchant account history. If no send to the payer is
+  there, call `rail.forgetRefund(paymentHash)` (any case) and the next reconcile
+  sends it once. `forgetRefund` never clears a refund that was sent or is still
+  in flight.
+- **Signer authors:** throw `RefundNotSentError` (exported) from `sendFor` only
+  when you know nothing was broadcast, i.e. you failed before any `process` RPC
+  was attempted (reading `account_info`, generating work, signing). The rail then
+  retries on the next reconcile with no operator step. It is recognised by
+  `name === 'RefundNotSentError'` and `notBroadcast === true`, so a copy from a
+  duplicate install of this package works too. The bundled test `nanoProvider`
+  never throws it: its fake send has no step before the publish.
 
 ### Refund limits
 
@@ -47,6 +56,8 @@ error.
   `context.refundOf` avoids this.
 - The per-instance record is never pruned: one small entry per refunded payment
   for the life of the process.
+- A `sendFor` that never settles (neither resolves nor rejects) leaves its
+  refund in flight until the process restarts; give your signer its own timeout.
 
 ## Proof is bound to the purchase and its payer
 
@@ -121,7 +132,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **80 passed**, including a rate that moves between quote and
+Rail unit tests: **87 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, rates given
 as strings, exponents and noisy floats, and the confirmation and signature gates
@@ -184,7 +195,7 @@ the fixed one.
   reconcile` CLI or cron) or after a restart can send a refund a second time if
   the earlier send published but its reply was lost, unless `sendFor` is
   idempotent on `refundOf`. A failed refund now waits for `forgetRefund(hash)`
-  instead of being retried.
+  instead of being retried, unless the signer threw `RefundNotSentError`.
 - **Block hashes are upper-cased.** The proof id and the settlement reference
   are now the upper-case hash. Drain, or let outstanding quotes expire, before
   upgrading, and do not run 0.3.1 and 0.3.2 instances against one ledger: the
@@ -194,6 +205,13 @@ the fixed one.
   without `verify()`.
 - **Stricter reads:** the verifier must return exactly `true` (not a truthy
   value), and `block_info`'s `confirmed` must be `true` or `"true"`.
+- **`rpc.blockInfo` is called with the upper-cased hash.** A case-sensitive RPC
+  adapter, cache or test fake must normalise the hash itself.
+- **`sendFor` results:** anything other than a block hash string, or an RPC body
+  `{ block }` / `{ hash }` holding a 64-hex hash, is now treated as a failed
+  refund (not re-sent until `forgetRefund`).
+- **Type:** `nanoRail` now returns `NanoRail`, which adds `forgetRefund`; a stub
+  typed as `ReturnType<typeof nanoRail>` needs that method.
 
 ## Install
 

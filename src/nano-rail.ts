@@ -272,27 +272,59 @@ function payableOf(quote: Quote): string {
 }
 
 /**
- * Error codes that mean the connection to the signer's node was never
- * established, so no block can have left this process: refused, or the host
- * name did not resolve. Deliberately NOT ETIMEDOUT, ECONNRESET, EPIPE or an
- * abort: those can happen after the request (and the block) went out.
+ * Thrown by a refund signer's `sendFor` ONLY when it knows that nothing was
+ * broadcast for this refund: it failed before any `process` RPC was attempted
+ * (for example reading `account_info`, generating work, or signing). The rail
+ * then forgets the attempt, so the next `refund` (e.g. from `reconcile()`) sends
+ * it again. Every other failure is treated as possibly published and is not
+ * re-sent until the operator calls `forgetRefund(hash)`.
+ *
+ * Do NOT throw it for a socket error, a timeout, or a failed confirmation poll:
+ * an error code describes the last connection attempt, not whether an earlier
+ * attempt published the block.
+ *
+ * The rail recognises it by brand, not `instanceof`, so it still works when the
+ * signer imports a different copy of this package: `name === 'RefundNotSentError'`
+ * and `notBroadcast === true`.
  */
-const PRE_BROADCAST_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
+export class RefundNotSentError extends Error {
+  readonly notBroadcast = true as const;
+  constructor(message = 'The refund send failed before anything was broadcast.', options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'RefundNotSentError';
+  }
+}
+
+/** The brand check for RefundNotSentError. Total: a hostile error object cannot make it throw. */
+function isRefundNotSent(error: unknown): boolean {
+  try {
+    if (typeof error !== 'object' || error === null) return false;
+    const branded = error as { name?: unknown; notBroadcast?: unknown };
+    return branded.name === 'RefundNotSentError' && branded.notBroadcast === true;
+  } catch {
+    return false;
+  }
+}
 
 /**
- * True only when the signer's failure certainly happened before anything was
- * sent: the error, or an error in its `cause` chain (fetch wraps the socket
- * error as `TypeError: fetch failed` with the real one in `cause`), carries one
- * of PRE_BROADCAST_CODES. The message text is never parsed.
+ * The reverse send's reference from what `sendFor` resolved to, or null.
+ * A non-empty string is taken as is. A JavaScript signer that hands back the RPC
+ * body un-destructured, `{ block: '<hash>' }` (nano's `process`) or
+ * `{ hash: '<hash>' }`, worked in 0.3.1, so exactly those two shapes are accepted
+ * when the value is a 64-hex block hash, upper-cased. Anything else is null.
  */
-function failedBeforeBroadcast(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 5 && typeof current === 'object' && current !== null; depth += 1) {
-    const code = (current as { code?: unknown }).code;
-    if (typeof code === 'string' && PRE_BROADCAST_CODES.has(code)) return true;
-    current = (current as { cause?: unknown }).cause;
+function referenceOf(value: unknown): string | null {
+  if (typeof value === 'string') return value === '' ? null : value;
+  try {
+    if (typeof value !== 'object' || value === null) return null;
+    const body = value as { block?: unknown; hash?: unknown };
+    for (const candidate of [body.block, body.hash]) {
+      if (typeof candidate === 'string' && /^[0-9a-fA-F]{64}$/.test(candidate)) return candidate.toUpperCase();
+    }
+  } catch {
+    // A hostile object: no reference.
   }
-  return false;
+  return null;
 }
 
 /** What this rail instance knows about the reverse send for one payment hash. */
@@ -567,44 +599,54 @@ export function nanoRail(options: NanoRailOptions): NanoRail {
       //   sent      -> answered `refunded` with the recorded reference;
       //   failed    -> the send may have been published; refused until the operator
       //                has checked the account and called `forgetRefund(hash)`.
-      // The one failure that is retried on its own is one that certainly happened
-      // before anything was sent (connection refused, host not found): the entry
-      // is removed so the next reconcile sends it.
-      const earlier = refunds.get(data.hash);
+      // The one failure that is retried on its own is a RefundNotSentError: the
+      // signer stating that nothing was broadcast. The entry is removed so the next
+      // reconcile sends it. Socket error codes are NOT read: they describe only the
+      // last connection attempt, and a retrying client or a confirmation poll can
+      // fail with ECONNREFUSED after the block was published.
+      //
+      // The map key is the canonical (upper-case) hash, so an authorization stored
+      // with a lower-case hash by 0.3.1 matches the hash `forgetRefund` is given.
+      const key = canonicalHash(data.hash);
+      const earlier = refunds.get(key);
       if (earlier !== undefined) {
         if (earlier.state === 'sent') return { status: 'refunded', reference: earlier.reference };
         if (earlier.state === 'in_flight') {
-          throw new TollstileError('PROVIDER_UNAVAILABLE', `A refund send for ${data.hash} is already in flight in this process; it is not sent again. Reconcile again once it has finished.`);
+          throw new TollstileError('PROVIDER_UNAVAILABLE', `A refund send for ${key} is already in flight in this process; it is not sent again. Reconcile again once it has finished.`);
         }
-        throw new TollstileError('PROVIDER_UNAVAILABLE', `The refund send for ${data.hash} failed earlier and may have been published; it is not sent again automatically. Check the merchant account for a send of ${data.amountRaw} raw to ${data.source}; if there is none, call rail.forgetRefund('${data.hash}') and reconcile again.`);
+        throw new TollstileError('PROVIDER_UNAVAILABLE', `The refund send for ${key} failed earlier and may have been published; it is not sent again automatically. Check the merchant account for a send of ${data.amountRaw} raw to ${data.source}; if there is none, call rail.forgetRefund('${key}') and reconcile again.`);
       }
-      refunds.set(data.hash, { state: 'in_flight' });
-      let reference: unknown;
+      refunds.set(key, { state: 'in_flight' });
+      let result: unknown;
       try {
-        reference = await signer.sendFor(data.source, data.amountRaw, { refundOf: data.hash });
+        result = await signer.sendFor(data.source, data.amountRaw, { refundOf: data.hash });
       } catch (error) {
-        if (failedBeforeBroadcast(error)) {
-          refunds.delete(data.hash);
-        } else {
-          refunds.set(data.hash, { state: 'failed' });
+        // Kept total: `isRefundNotSent` cannot throw, so the entry never stays
+        // `in_flight` after the send has settled.
+        if (isRefundNotSent(error)) {
+          refunds.delete(key);
+          throw providerError(`the refund send for ${key} (nothing was broadcast; it is retried)`, error);
         }
-        throw providerError(`the refund send for ${data.hash}`, error);
+        refunds.set(key, { state: 'failed' });
+        throw new TollstileError('PROVIDER_UNAVAILABLE', `The refund send for ${key} failed and may have been published; it is not sent again automatically. Check the merchant account for a send of ${data.amountRaw} raw to ${data.source}; if there is none, call rail.forgetRefund('${key}') and reconcile again.`, { cause: error });
       }
       // `sendFor` is declared to return the send's hash, but it is the operator's
       // code (see the verifier above): `undefined`, or a JSON body handed back
       // un-destructured, means a send whose outcome we cannot name. It is treated
       // as a failure that may have been published, never as a reason to send again.
-      if (typeof reference !== 'string' || reference === '') {
-        refunds.set(data.hash, { state: 'failed' });
-        throw new TollstileError('PROVIDER_UNAVAILABLE', `The refund send for ${data.hash} returned no block hash, so it may have been published; it is not sent again automatically. Check the merchant account for a send of ${data.amountRaw} raw to ${data.source}; if there is none, call rail.forgetRefund('${data.hash}') and reconcile again.`);
+      // (`referenceOf` accepts the two RPC-body shapes 0.3.1 tolerated.)
+      const reference = referenceOf(result);
+      if (reference === null) {
+        refunds.set(key, { state: 'failed' });
+        throw new TollstileError('PROVIDER_UNAVAILABLE', `The refund send for ${key} returned no block hash, so it may have been published; it is not sent again automatically. Check the merchant account for a send of ${data.amountRaw} raw to ${data.source}; if there is none, call rail.forgetRefund('${key}') and reconcile again.`);
       }
-      refunds.set(data.hash, { state: 'sent', reference });
+      refunds.set(key, { state: 'sent', reference });
       return { status: 'refunded', reference };
     },
 
     async lookup(authorization: Authorization & { data: NanoData }): Promise<LookupResult> {
       const data = authorization.data;
-      const refunded = refunds.get(data.hash);
+      const refunded = refunds.get(canonicalHash(data.hash));
       if (refunded?.state === 'sent') return { status: 'refunded', reference: refunded.reference };
       const block = await readBlock();
       async function readBlock(): Promise<NanoBlockInfo | undefined> {

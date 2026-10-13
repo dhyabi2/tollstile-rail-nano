@@ -3,7 +3,7 @@ import { httpContext, mcpContext, railConformance } from 'tollstile/testing';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { nanoProvider } from '../src/nano-provider.js';
-import { nanoRail, parseRate, toRaw, type NanoData } from '../src/nano-rail.js';
+import { nanoRail, parseRate, RefundNotSentError, toRaw, type NanoData } from '../src/nano-rail.js';
 import { harness } from './harness.js';
 import type { NanoBlockInfo, NanoSigner } from '../src/nano-types.js';
 import {
@@ -1294,6 +1294,26 @@ describe('a refund that failed is retried only when it certainly never left', ()
     expect(ledger.charges()[0].payment).toBe('unknown');
   });
 
+  it.each([['block'], ['hash']])('a send that resolved to an RPC body { %s: <64-hex> } counts as sent and is not sent again', async (field) => {
+    const body = { [field]: 'ab'.repeat(32) };
+    let calls = 0;
+    const { provider, enter, toll, ledger } = setup({
+      sendFor() {
+        calls += 1;
+        return Promise.resolve(body as unknown as string);
+      },
+    });
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+    await paid.pass.complete('failed');
+    const [charge] = ledger.charges();
+    expect(charge.payment).toBe('refunded');
+    expect(charge.refundReference).toBe('AB'.repeat(32));
+    await later();
+    await toll.reconcile({ olderThanMs: 0 });
+    expect(calls).toBe(1);
+  });
+
   it('a second refund while the first is in flight is refused with its own error and sends nothing', async () => {
     const node = nanoProvider(MERCHANT);
     let release: () => void = () => undefined;
@@ -1329,7 +1349,27 @@ describe('a refund that failed is retried only when it certainly never left', ()
   it.each([
     ['an error coded ECONNREFUSED', () => codeError('ECONNREFUSED')],
     ['fetch failed, caused by ENOTFOUND', () => new TypeError('fetch failed', { cause: codeError('ENOTFOUND') })],
-  ])('%s is retried by the next reconcile and lands exactly one refund', async (_label, makeError) => {
+    ['an error coded ETIMEDOUT', () => codeError('ETIMEDOUT')],
+    ['an error coded ECONNRESET', () => codeError('ECONNRESET')],
+  ])('%s is not retried automatically: a socket code does not say the block was not published', async (_label, makeError) => {
+    const { node, state, signer } = failingSigner((call) => (call === 1 ? makeError() : 'send'));
+    const { provider, enter, toll, ledger } = setup(signer);
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+    await paid.pass.complete('failed');
+
+    await later();
+    const round = await toll.reconcile({ olderThanMs: 0 });
+    expect(state.calls, 'reconcile re-sent after a failure that may have published').toBe(1);
+    expect(node.refundCount()).toBe(0);
+    expect(ledger.charges()[0].payment).toBe('unknown');
+    expect(JSON.stringify(round.errors)).toMatch(/forgetRefund/);
+  });
+
+  it.each([
+    ['thrown by this package', () => new RefundNotSentError('account_info failed before process', { cause: codeError('ECONNREFUSED') })],
+    ['from another copy of the package (brand only)', () => Object.assign(new Error('not sent'), { name: 'RefundNotSentError', notBroadcast: true })],
+  ])('a RefundNotSentError %s is retried by the next reconcile and lands exactly one refund', async (_label, makeError) => {
     const { node, state, signer } = failingSigner((call) => (call === 1 ? makeError() : 'send'));
     const { provider, enter, toll, ledger } = setup(signer);
     const paid = await payAndEnter(enter, provider);
@@ -1350,19 +1390,91 @@ describe('a refund that failed is retried only when it certainly never left', ()
     expect(node.refundCount()).toBe(1);
   });
 
-  it.each([['ETIMEDOUT'], ['ECONNRESET']])('a %s failure is not retried: the send may have gone out', async (code) => {
-    const { node, state, signer } = failingSigner((call) => (call === 1 ? codeError(code) : 'send'));
-    const { provider, enter, toll, ledger } = setup(signer);
+  it('a retrying client that published, lost the reply, then hit ECONNREFUSED is not sent again', async () => {
+    const node = nanoProvider(MERCHANT);
+    let nodeUp = true;
+    const refused = () => new TypeError('fetch failed', { cause: codeError('ECONNREFUSED') });
+    async function rpcProcess(destination: string, amountRaw: string, context: { refundOf: string }) {
+      if (!nodeUp) throw refused();
+      await node.sendFor(destination, amountRaw, context); // the block went out
+      nodeUp = false; // the node restarts right after publishing
+      throw new TypeError('fetch failed', { cause: codeError('ECONNRESET') });
+    }
+    const { provider, enter, toll } = setup({
+      async sendFor(destination, amountRaw, context) {
+        let last: unknown;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            await rpcProcess(destination, amountRaw, context);
+          } catch (error) {
+            last = error;
+          }
+        }
+        throw last;
+      },
+    });
     const paid = await payAndEnter(enter, provider);
     if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
     await paid.pass.complete('failed');
-
+    nodeUp = true;
     await later();
-    const round = await toll.reconcile({ olderThanMs: 0 });
-    expect(state.calls, 'reconcile re-sent after a timeout-style failure').toBe(1);
-    expect(node.refundCount()).toBe(0);
-    expect(ledger.charges()[0].payment).toBe('unknown');
-    expect(JSON.stringify(round.errors)).toMatch(/forgetRefund/);
+    await toll.reconcile({ olderThanMs: 0 });
+    expect(node.refundCount(), 'second reverse send of the same payment').toBe(1);
+  });
+
+  it('a signer that published and then failed its confirmation poll is not sent again', async () => {
+    const node = nanoProvider(MERCHANT);
+    let pollDown = true;
+    const { provider, enter, toll } = setup({
+      async sendFor(destination, amountRaw, context) {
+        const hash = await node.sendFor(destination, amountRaw, context); // published
+        if (pollDown) throw new TypeError('fetch failed', { cause: codeError('ECONNREFUSED') });
+        return hash;
+      },
+    });
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+    await paid.pass.complete('failed');
+    pollDown = false;
+    await later();
+    await toll.reconcile({ olderThanMs: 0 });
+    expect(node.refundCount(), 'second reverse send of the same payment').toBe(1);
+  });
+
+  it('forgetRefund clears a failed refund whose stored hash is lower case (a 0.3.1 row), and the next refund sends once', async () => {
+    const node = nanoProvider(MERCHANT);
+    let calls = 0;
+    const signer: NanoSigner = {
+      async sendFor(destination, amountRaw, context) {
+        calls += 1;
+        if (calls === 1) throw new Error('socket reset');
+        return node.sendFor(destination, amountRaw, context);
+      },
+    };
+    const { provider, enter, toll, ledger, rail } = setup(signer);
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+    const [charge] = ledger.charges();
+    const authorization = (await ledger.getAuthorization(charge.authorizationId))!;
+    const lower = (authorization.data as NanoData).hash.toLowerCase();
+    // The row as 0.3.1 stored it: the hash in the case the payer sent.
+    const old = { ...authorization, data: { ...(authorization.data as NanoData), hash: lower } };
+    const direct = rail as unknown as Direct;
+    const failure = await direct.refund(old, charge).catch((error: unknown) => error as TollstileError);
+    expect((failure as TollstileError).message).toMatch(/forgetRefund/);
+    expect(rail.forgetRefund(lower), 'operator pastes the stored hash').toBe(true);
+
+    // The next refund for that row sends exactly once...
+    expect(await direct.refund(old, charge)).toMatchObject({ status: 'refunded' });
+    expect(calls).toBe(2);
+    expect(node.refundCount()).toBe(1);
+    // ...and the upper-case row core holds now is answered from the same entry.
+    await paid.pass.complete('failed');
+    await later();
+    await toll.reconcile({ olderThanMs: 0 });
+    expect(ledger.charges()[0].payment).toBe('refunded');
+    expect(calls, 'a second send for one payment under another case').toBe(2);
+    expect(node.refundCount()).toBe(1);
   });
 
   it('forgetRefund lets exactly one more send through, and never clears a sent refund', async () => {

@@ -1,4 +1,4 @@
-export { nanoRail } from './nano-rail.js';
+export { nanoRail, RefundNotSentError } from './nano-rail.js';
 export type { NanoData, NanoRail } from './nano-rail.js';
 export {
   NANO_ASSET,
