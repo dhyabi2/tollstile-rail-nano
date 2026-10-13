@@ -52,8 +52,21 @@ tied to the specific purchase to be safe (Tollstile#47 and #49 reviews):
 
 `verifier` is **required**: `nanoRail()` throws `CONFIG_INVALID` at construction
 when it is missing or unusable, because refusing at verify time would be after the
-payer's XNO moved. There is no other check in `verify` that can fail after
-payment for a configuration reason.
+payer's XNO moved.
+
+`merchantAccount` is checked at construction for the same reason, and it is the
+one that bites hardest. `verify` admits a block only when `block.destination ===
+merchantAccount`, an exact string compare against the account the node names, so
+an account that is not **exactly** what the network writes refuses every real
+payment -- one payer at a time, each after their send has confirmed on-chain, each
+answered `proof_invalid` with `retryable: true` and "Pay again using this
+response." One trailing newline does it, and the install snippet below reads the
+value from `process.env`, where a newline is exactly what you get. `nanoRail()`
+now throws `CONFIG_INVALID` unless it is `nano_`/`xrb_` plus 60 base32 characters
+with nothing around them. The **checksum** is still not verified: that needs
+BLAKE2b with a 5-byte digest, which `node:crypto` cannot produce, so a merchant
+address with a mistyped character still constructs -- check yours against a wallet
+or an explorer once.
 
 ## Rate
 
@@ -99,7 +112,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **70 passed**, including a rate that moves between quote and
+Rail unit tests: **71 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, rates given
 as strings, exponents and noisy floats, and the confirmation and signature gates

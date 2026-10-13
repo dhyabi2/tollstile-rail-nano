@@ -15,7 +15,7 @@ import {
   NANO_SIGNATURE_META,
 } from '../src/nano-types.js';
 
-const MERCHANT = 'nano_3merchantaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const MERCHANT = 'nano_1h6o1hmf9s19ph6onk7buwbttjb9khikmo5pnjbr68r3thsxhunmrh4fhjuu';
 const XNO_PER_USD = '0.01'; // $1 -> 1e28 raw
 
 /** Tracks settled blocks the toll records, deduped by reference (core fires
@@ -117,6 +117,59 @@ describe('nano rail', () => {
     expect(completion.settlement).toBe('settled');
     // Core recorded exactly one settlement via onEvent (not a merchant-side hook).
     expect(settledHashes.length).toBe(1);
+  });
+
+  it('fails closed at construction for a merchantAccount the network will not echo back', async () => {
+    // The third option with this hazard, and the one with the worst ending.
+    // `verify` admits a block only when `block.destination === merchantAccount` --
+    // an exact string compare against the account the node names -- so a
+    // merchantAccount that is not EXACTLY what the network writes refuses every
+    // real payment, one payer at a time, after each send has confirmed on-chain.
+    //
+    // One trailing newline is enough, and that is what an env file, a JSON config
+    // or a copied line hands you. Measured on master, with the payer sending the
+    // exact challenged amount to this merchant:
+    //
+    //     challenge accepts.to -> "nano_...\n"     (the padding is published too)
+    //     the paid request     -> denied proof_invalid, retryable: true,
+    //                             action: "pay", "Pay again using this response."
+    //
+    // The gate asks for the money again, on an asset with no chargeback, and goes
+    // on doing it until someone reads the config. Nothing downstream can catch it:
+    // the address is well-formed enough to publish in the 402, and the amount and
+    // the signature are both right.
+    const provider = nanoProvider(MERCHANT);
+    const base = { rpc: provider, signer: provider, verifier: provider, xnoPerUsd: XNO_PER_USD };
+    const bad = [
+      `${MERCHANT}\n`,              // the measured case: a trailing newline
+      ` ${MERCHANT}`,               // and a leading space
+      `${MERCHANT} `,
+      MERCHANT.slice(0, -1),        // one character short
+      `${MERCHANT}a`,               // one character long
+      MERCHANT.toUpperCase(),       // not the casing the network writes
+      MERCHANT.replace('nano_1', 'nano_2'),   // only 1 and 3 can lead a Nano body
+      MERCHANT.replace('nano_', 'nanoo_'),
+      MERCHANT.replace('h', 'l'),   // `l`, `0`, `2` and `v` are not in Nano's base32
+      '',
+      undefined,
+      null,
+      42,
+    ];
+    for (const account of bad) {
+      expect(
+        () => nanoRail({ ...base, merchantAccount: account as never }),
+        `merchantAccount ${JSON.stringify(account)} was accepted`,
+      ).toThrowError(/merchantAccount/);
+    }
+    // Both prefixes the network writes still construct, and nothing else changes.
+    for (const good of [MERCHANT, MERCHANT.replace('nano_', 'xrb_')]) {
+      expect(() => nanoRail({ ...base, merchantAccount: good })).not.toThrow();
+    }
+    // The guard is at construction, so a rail that DID construct still admits a
+    // real payment: the control that this refusal costs nothing at verify time.
+    const { enter, provider: p2 } = setup();
+    const paid = await payAndEnter(enter, p2);
+    expect(paid.kind).toBe('admitted');
   });
 
   it('fails closed at construction for a verifier that is present but unusable', () => {

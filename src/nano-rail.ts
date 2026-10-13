@@ -268,6 +268,20 @@ function payableOf(quote: Quote): string {
 }
 
 /**
+ * A Nano account as the network writes it: `nano_`/`xrb_`, then 60 base32
+ * characters whose first is `1` or `3` (the 260-bit body is 4 padding bits + a
+ * 256-bit public key + a 40-bit checksum, so only two values can lead).
+ *
+ * Shape only. The checksum is the one thing that catches a mistyped character, and
+ * verifying it needs BLAKE2b with a 5-byte digest, which `node:crypto` cannot
+ * produce - `createHash('blake2b512')` is fixed at 64 bytes and BLAKE2b puts the
+ * digest length in its IV, so a truncation of it is a different hash. A dependency
+ * for that is the operator's call, not this rail's; the shape alone catches every
+ * cause measured below.
+ */
+const NANO_ACCOUNT = /^(?:nano|xrb)_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/;
+
+/**
  * A Nano (XNO) settlement rail for Tollstile.
  *
  * Flow `upfront`: the payer's confirmed `send` block is the payment and it has
@@ -321,6 +335,27 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
   // 0.2.x would otherwise have it silently ignored and stop booking payments.
   if ((options as { onSettled?: unknown }).onSettled !== undefined) {
     throw new TollstileError('CONFIG_INVALID', 'nanoRail no longer accepts onSettled (it fired again on a replay). Use createTollstile({ onEvent }) and book on `authorization.opened` with `created: true`, or `charge.moved`; core emits those once, after its ledger has decided.');
+  }
+  // And the merchant's own account, for the same reason and with a worse ending.
+  // `verify` admits a block only when `block.destination === merchantAccount`, an
+  // exact string compare against the account the node names - so a
+  // `merchantAccount` that is not EXACTLY what the network will echo back refuses
+  // every real payment, one at a time, after each payer's send has confirmed
+  // on-chain. Measured on master with `merchantAccount: `${MERCHANT}\n`` (one
+  // trailing newline, which is what an env file, a JSON config or a copied line
+  // gives you), a confirmed send of the exact challenged amount to this merchant:
+  //
+  //     challenge accepts.to -> "nano_3merchant...\n"   (the padding is published too)
+  //     the paid request     -> denied proof_invalid, retryable: true, action: "pay",
+  //                             "The nano payment was not accepted. Pay again using this response."
+  //
+  // The gate asks for the money again, on an asset with no chargeback, and will do
+  // so for every payer until someone reads the config. Nothing downstream can catch
+  // it: the address is well-formed enough to publish in the 402, the amount and the
+  // signature are right, and the only mismatch is the merchant's own setting. So it
+  // is refused here, where it costs a boot instead of a payment.
+  if (typeof options.merchantAccount !== 'string' || !NANO_ACCOUNT.test(options.merchantAccount)) {
+    throw new TollstileError('CONFIG_INVALID', `nanoRail needs merchantAccount to be a Nano address exactly as the network writes it (nano_ or xrb_ and 60 base32 characters, no surrounding whitespace); got ${JSON.stringify(options.merchantAccount)}. verify() compares it to the destination the node reports, so anything else refuses every payment after it has confirmed on-chain.`);
   }
   const merchant = options.merchantAccount;
   const rpc = options.rpc;
