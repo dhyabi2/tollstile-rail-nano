@@ -78,15 +78,45 @@ real payment. With the guard's condition alone disabled (`if (false)`), exactly 
 fails: `merchantAccount "nano_1h6o...\n" was accepted: expected [Function] to throw an
 error`. With it: **78 passed, 2 skipped**, lint, typecheck and build clean.
 
+### My guard had a trap in it, closed on this branch by another routine (`7db6e08`)
+
+Two things, and the first is mine to own. I allowed `xrb_` in `NANO_ACCOUNT` and added a
+test asserting that **both prefixes still construct** — then wrote in the pull request that
+this was the guard changing nothing. It is not: `xrb_` is the legacy spelling of the same
+key, but **nodes name destinations `nano_`**, and `verify` compares the strings exactly. So
+an `xrb_` merchant was refused on every confirmed payment, with the same "Pay again" answer
+this whole pass is about. My test checked that construction succeeded and stopped one step
+short of the only question that matters. `7db6e08` rewrites `xrb_` to `nano_` once, at
+construction, and publishes and compares that value. Measured here through the real rail,
+`xrb_` configured against a provider naming `nano_`:
+
+```
+configured xrb_, challenge publishes: nano_1h6o1hm ...
+xrb_ configured, node names nano_ -> admitted
+```
+
+Second, it **does** verify the checksum, which I had recorded below as impossible without a
+dependency. It carries a 92-line unkeyed RFC 7693 BLAKE2b (`src/blake2b.ts`) for the 5-byte
+digest `node:crypto` will not produce. That claim I did not take on trust: its own suite
+only pins it against `createHash('blake2b512')` at outlen 64, so I generated **201 vectors
+from it** — digest lengths 1 to 64, the empty input, and inputs crossing the 128-byte block
+boundary — and compared every one against Python's `hashlib.blake2b(..., digest_size=n)`:
+**0 mismatches**. End to end, a one-character change at body positions 6, 20, 40 and 60 is
+refused at boot, and both real live-network addresses this repository already carries
+(`nano_3nhh9…`, `nano_1banex…`) validate.
+
+Branch total: **81 passed, 2 skipped**; lint, typecheck and build clean.
+
+The lesson worth copying: a guard that refuses a bad value is only half of it. The test has
+to carry the value all the way to the decision it protects — my `xrb_` case asserted
+`not.toThrow()` at construction when it should have asserted a payment was *admitted*.
+
 ## Could not verify
 
-- The **checksum** of a merchant address is still not checked, so a single mistyped
-  character still constructs. It needs BLAKE2b with a 5-byte digest, which `node:crypto`
-  cannot produce (`blake2b512` is fixed at 64 bytes, and BLAKE2b puts the digest length in
-  its IV, so truncating it is a different hash). A dependency for that is the operator's
-  call, not this rail's; the README now says to check the address against a wallet once.
 - Still not run end to end against a Nano test network — unchanged, and the README says so.
   `examples/rpc-network-check.mjs` remains the read-path check.
+- The BLAKE2b above is cross-checked against `hashlib` and `node:crypto`, not against a
+  Nano node: no address was round-tripped through the live network from here.
 
 ## Note for the merger
 
