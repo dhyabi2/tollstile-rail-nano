@@ -38,9 +38,13 @@ export type NanoProvider = NanoRpcRead &
 
 let seq = 0;
 
-function hashFor(prefix: string): string {
-  const n = `0000000000000000000000000000000000000000000000000000000000000000${String(seq++).padStart(6, '0')}`;
-  return `${prefix}${n.slice(-32)}`;
+/**
+ * A fake block hash in the real shape: 64 hex digits, with letters in it so a
+ * case change is visible (the rail upper-cases hashes and accepts only 64-hex
+ * send references).
+ */
+function hashFor(): string {
+  return `FA11ED${String(seq++).padStart(58, '0')}`;
 }
 
 /** Deterministic ED25519 keypair per Nano account string, so signing/verify are coherent. */
@@ -75,7 +79,7 @@ export function nanoProvider(merchantAccount: string): NanoProvider {
   const key = (hash: string) => hash.toUpperCase();
   let refunds = 0;
   const confirmedSend = (source: string, destination: string, amountRaw: string, subtype: 'send' = 'send') => {
-    const hash = hashFor('fail_');
+    const hash = hashFor();
     const block: NanoBlockInfo = { hash, confirmed: true, source, destination, amountRaw, subtype };
     blocks.set(key(hash), block);
     return { hash, block };

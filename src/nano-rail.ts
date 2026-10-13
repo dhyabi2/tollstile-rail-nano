@@ -281,7 +281,9 @@ function payableOf(quote: Quote): string {
  *
  * Do NOT throw it for a socket error, a timeout, or a failed confirmation poll:
  * an error code describes the last connection attempt, not whether an earlier
- * attempt published the block.
+ * attempt published the block. Never throw it from a `sendFor` that made ANY
+ * `process` attempt for this refund: a retrying signer whose last attempt failed
+ * before broadcast cannot know an earlier attempt did not publish.
  *
  * The rail recognises it by brand, not `instanceof`, so it still works when the
  * signer imports a different copy of this package: `name === 'RefundNotSentError'`
@@ -306,20 +308,24 @@ function isRefundNotSent(error: unknown): boolean {
   }
 }
 
+/** A Nano block hash: exactly 64 hex digits, either case. */
+const BLOCK_HASH = /^[0-9a-fA-F]{64}$/;
+
 /**
- * The reverse send's reference from what `sendFor` resolved to, or null.
- * A non-empty string is taken as is. A JavaScript signer that hands back the RPC
- * body un-destructured, `{ block: '<hash>' }` (nano's `process`) or
- * `{ hash: '<hash>' }`, worked in 0.3.1, so exactly those two shapes are accepted
- * when the value is a 64-hex block hash, upper-cased. Anything else is null.
+ * The reverse send's reference from what `sendFor` resolved to, upper-cased, or
+ * null. Only a 64-hex block hash is a reference: a signer that hands back raw RPC
+ * text such as '{"error":"Fork"}' did not name a send, and must not book the
+ * charge refunded. A JavaScript signer that returns the RPC body un-destructured,
+ * `{ block: '<hash>' }` (nano's `process`) or `{ hash: '<hash>' }`, worked in
+ * 0.3.1, so exactly those two shapes are accepted too. Anything else is null.
  */
 function referenceOf(value: unknown): string | null {
-  if (typeof value === 'string') return value === '' ? null : value;
+  if (typeof value === 'string') return BLOCK_HASH.test(value) ? value.toUpperCase() : null;
   try {
     if (typeof value !== 'object' || value === null) return null;
     const body = value as { block?: unknown; hash?: unknown };
     for (const candidate of [body.block, body.hash]) {
-      if (typeof candidate === 'string' && /^[0-9a-fA-F]{64}$/.test(candidate)) return candidate.toUpperCase();
+      if (typeof candidate === 'string' && BLOCK_HASH.test(candidate)) return candidate.toUpperCase();
     }
   } catch {
     // A hostile object: no reference.
@@ -607,6 +613,9 @@ export function nanoRail(options: NanoRailOptions): NanoRail {
       //
       // The map key is the canonical (upper-case) hash, so an authorization stored
       // with a lower-case hash by 0.3.1 matches the hash `forgetRefund` is given.
+      if (typeof data.hash !== 'string' || data.hash === '') {
+        throw new TollstileError('PROVIDER_UNAVAILABLE', 'The authorization has no payment block hash to refund; nothing was sent. Check the ledger row for this charge.');
+      }
       const key = canonicalHash(data.hash);
       const earlier = refunds.get(key);
       if (earlier !== undefined) {
@@ -646,7 +655,7 @@ export function nanoRail(options: NanoRailOptions): NanoRail {
 
     async lookup(authorization: Authorization & { data: NanoData }): Promise<LookupResult> {
       const data = authorization.data;
-      const refunded = refunds.get(canonicalHash(data.hash));
+      const refunded = typeof data.hash === 'string' ? refunds.get(canonicalHash(data.hash)) : undefined;
       if (refunded?.state === 'sent') return { status: 'refunded', reference: refunded.reference };
       const block = await readBlock();
       async function readBlock(): Promise<NanoBlockInfo | undefined> {
@@ -686,6 +695,7 @@ export function nanoRail(options: NanoRailOptions): NanoRail {
 
   return Object.assign(rail, {
     forgetRefund(hash: string): boolean {
+      if (typeof hash !== 'string') return false;
       const key = canonicalHash(hash);
       if (refunds.get(key)?.state !== 'failed') return false;
       return refunds.delete(key);

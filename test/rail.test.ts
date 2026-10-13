@@ -1267,7 +1267,7 @@ describe('a refund that failed is retried only when it certainly never left', ()
         const step = plan(state.calls);
         if (step instanceof Error) throw step;
         const hash = await node.sendFor(destination, amountRaw, context);
-        return step === 'non-string' ? ({ hash } as unknown as string) : hash;
+        return step === 'non-string' ? ({ sent: hash } as unknown as string) : hash;
       },
     };
     return { node, state, signer };
@@ -1312,6 +1312,63 @@ describe('a refund that failed is retried only when it certainly never left', ()
     await later();
     await toll.reconcile({ olderThanMs: 0 });
     expect(calls).toBe(1);
+  });
+
+  it('a send that resolved to raw RPC text is not booked refunded and not sent again', async () => {
+    let calls = 0;
+    const { provider, enter, toll, ledger, events } = setup({
+      sendFor() {
+        calls += 1;
+        return Promise.resolve('{"error":"Fork"}');
+      },
+    });
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+    await paid.pass.complete('failed');
+    expect(ledger.charges()[0].payment).toBe('unknown');
+    const failure = events.find((event) => event.type === 'error') as { error: TollstileError } | undefined;
+    expect(failure?.error.code).toBe('PROVIDER_UNAVAILABLE');
+    expect(failure?.error.message).toMatch(/forgetRefund/);
+    await later();
+    await toll.reconcile({ olderThanMs: 0 });
+    expect(calls, 'reconcile called sendFor again').toBe(1);
+    expect(ledger.charges()[0].payment).toBe('unknown');
+  });
+
+  it('a send that resolved to a lower-case 64-hex hash is refunded with the upper-case reference', async () => {
+    let calls = 0;
+    const { provider, enter, toll, ledger } = setup({
+      sendFor() {
+        calls += 1;
+        return Promise.resolve('cd'.repeat(32));
+      },
+    });
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+    await paid.pass.complete('failed');
+    expect(ledger.charges()[0].payment).toBe('refunded');
+    expect(ledger.charges()[0].refundReference).toBe('CD'.repeat(32));
+    await later();
+    await toll.reconcile({ olderThanMs: 0 });
+    expect(calls).toBe(1);
+  });
+
+  it('an authorization without a string hash is refused with a TollstileError and sends nothing', async () => {
+    let calls = 0;
+    const node = nanoProvider(MERCHANT);
+    const rail = nanoRail({
+      merchantAccount: MERCHANT,
+      rpc: node,
+      signer: { sendFor: () => { calls += 1; return Promise.resolve('AB'.repeat(32)); } },
+      verifier: node,
+      xnoPerUsd: XNO_PER_USD,
+    });
+    const authorization = { data: { hash: 42, source: 'nano_x', destination: MERCHANT, amountRaw: '1', quoteId: null } };
+    const failure = await (rail as unknown as Direct).refund(authorization, {}).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(TollstileError);
+    expect((failure as TollstileError).code).toBe('PROVIDER_UNAVAILABLE');
+    expect(calls).toBe(0);
+    expect(rail.forgetRefund(42 as unknown as string)).toBe(false);
   });
 
   it('a second refund while the first is in flight is refused with its own error and sends nothing', async () => {

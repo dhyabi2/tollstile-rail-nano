@@ -28,8 +28,8 @@ a deliberate choice, not a bug — make sure it is what your terms say.
 
 Within one rail instance the rail sends **at most one** reverse send per
 payment. If `sendFor` throws, or resolves to anything other than a block hash
-string (or `{ block }` / `{ hash }` holding a 64-hex hash), the send may still have been published, so the charge is left `unknown`
-and is not sent again by `reconcile()`. A socket error code (`ECONNREFUSED`,
+of 64 hex digits (or `{ block }` / `{ hash }` holding one), the send may still
+have been published, so the charge is left `unknown` and is not sent again by `reconcile()`. A socket error code (`ECONNREFUSED`,
 `ENOTFOUND`, a timeout) does not change that: it describes the last connection
 attempt, not whether an earlier attempt or a confirmation poll came after a
 published block. A second refund for a payment whose send is still running is
@@ -41,7 +41,9 @@ refused with its own "already in flight" error.
   in flight.
 - **Signer authors:** throw `RefundNotSentError` (exported) from `sendFor` only
   when you know nothing was broadcast, i.e. you failed before any `process` RPC
-  was attempted (reading `account_info`, generating work, signing). The rail then
+  was attempted for this refund (reading `account_info`, generating work,
+  signing). Never throw it after ANY earlier `process` attempt, even if the last
+  attempt failed before broadcast: an earlier one may have published. The rail then
   retries on the next reconcile with no operator step. It is recognised by
   `name === 'RefundNotSentError'` and `notBroadcast === true`, so a copy from a
   duplicate install of this package works too. The bundled test `nanoProvider`
@@ -132,7 +134,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **87 passed**, including a rate that moves between quote and
+Rail unit tests: **90 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, rates given
 as strings, exponents and noisy floats, and the confirmation and signature gates
@@ -207,9 +209,10 @@ the fixed one.
   value), and `block_info`'s `confirmed` must be `true` or `"true"`.
 - **`rpc.blockInfo` is called with the upper-cased hash.** A case-sensitive RPC
   adapter, cache or test fake must normalise the hash itself.
-- **`sendFor` results:** anything other than a block hash string, or an RPC body
-  `{ block }` / `{ hash }` holding a 64-hex hash, is now treated as a failed
-  refund (not re-sent until `forgetRefund`).
+- **`sendFor` results:** anything other than a 64-hex block hash string, or an
+  RPC body `{ block }` / `{ hash }` holding one, is now treated as a failed
+  refund (not re-sent until `forgetRefund`, or a restart: see Refund limits).
+  References are upper-cased.
 - **Type:** `nanoRail` now returns `NanoRail`, which adds `forgetRefund`; a stub
   typed as `ReturnType<typeof nanoRail>` needs that method.
 
