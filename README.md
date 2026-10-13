@@ -26,11 +26,27 @@ money has already moved on-chain and the merchant keeps it. If you need a failed
 call to give the money back, configure a `signer`; if you cannot, that behavior is
 a deliberate choice, not a bug — make sure it is what your terms say.
 
-The rail sends **at most one** reverse send per payment. If `sendFor` throws, the
-send may still have been published, so the charge is left `unknown` and is not
-sent again by `reconcile()` from the same process: check the merchant account
-for it. Make `sendFor` idempotent on `context.refundOf` if reconciliation can run
-in another process.
+Within one rail instance the rail sends **at most one** reverse send per
+payment. If `sendFor` throws, or resolves to anything other than a block hash
+string, the send may still have been published, so the charge is left `unknown`
+and is not sent again by `reconcile()`. Check the merchant account history; if
+no send to the payer is there, call `rail.forgetRefund(paymentHash)` and the
+next reconcile sends it once. `forgetRefund` never clears a refund that was sent
+or is still in flight. The one failure retried on its own is a connection that
+was never made (error code, or a `cause` code, of `ECONNREFUSED`, `ENOTFOUND` or
+`EAI_AGAIN`); a timeout or `ECONNRESET` is not retried. A second refund for a
+payment whose send is still running is refused with its own "already in flight"
+error.
+
+### Refund limits
+
+- **The guard is in memory, per rail instance.** A reconcile in a fresh process
+  (the `tollstile reconcile` CLI, a cron job) or after a restart does not know
+  about earlier sends, and can send a refund a second time if the earlier send
+  was published but its reply was lost. A signer whose `sendFor` is idempotent on
+  `context.refundOf` avoids this.
+- The per-instance record is never pruned: one small entry per refunded payment
+  for the life of the process.
 
 ## Proof is bound to the purchase and its payer
 
@@ -105,7 +121,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **73 passed**, including a rate that moves between quote and
+Rail unit tests: **80 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, rates given
 as strings, exponents and noisy floats, and the confirmation and signature gates
@@ -160,6 +176,24 @@ Two defects reach a payer in those versions, both fixed here:
 
 Publishing is not something this repository can do for you; the version here is
 the fixed one.
+
+## Upgrading to 0.3.2
+
+- **Refunds:** the double-refund guard is in memory per rail instance; see
+  "Refund limits" above. A reconcile in a fresh process (the `tollstile
+  reconcile` CLI or cron) or after a restart can send a refund a second time if
+  the earlier send published but its reply was lost, unless `sendFor` is
+  idempotent on `refundOf`. A failed refund now waits for `forgetRefund(hash)`
+  instead of being retried.
+- **Block hashes are upper-cased.** The proof id and the settlement reference
+  are now the upper-case hash. Drain, or let outstanding quotes expire, before
+  upgrading, and do not run 0.3.1 and 0.3.2 instances against one ledger: the
+  same block would have two proof ids.
+- **Configurations that now throw `CONFIG_INVALID` at construction:** passing
+  `onSettled`; `signer: null` or a signer without `sendFor()`; a verifier
+  without `verify()`.
+- **Stricter reads:** the verifier must return exactly `true` (not a truthy
+  value), and `block_info`'s `confirmed` must be `true` or `"true"`.
 
 ## Install
 

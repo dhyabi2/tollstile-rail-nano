@@ -1,5 +1,5 @@
 export { nanoRail } from './nano-rail.js';
-export type { NanoData } from './nano-rail.js';
+export type { NanoData, NanoRail } from './nano-rail.js';
 export {
   NANO_ASSET,
   NANO_BLOCK_HEADER,
