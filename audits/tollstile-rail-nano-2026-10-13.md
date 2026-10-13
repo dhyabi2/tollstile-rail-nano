@@ -74,3 +74,13 @@ stamps the ledger with the same fake time, so advancing it past the window (`clo
 then `reconcile({ olderThanMs: 1_000 })`) examines the charge deterministically; without the
 advance, nothing is examined. On the real clock, a negative window (`olderThanMs: -1_000`) puts the
 boundary just after the charge.
+
+**Pass `olderThanMs` explicitly whenever you advance a fake clock.** Bare `reconcile()` defaults to
+`DEFAULT_RECONCILE_AFTER_MS`, which is **15 minutes**, so `clock.advance(60_000)` followed by
+`reconcile()` clears a sixtieth of the window and examines nothing. That is the combination this
+note first reported as "a `fakeClock` does not work", and the clock was never the reason.
+Measured, one failed handler and a signer whose send is published before the reply is lost:
+
+    fakeClock, advance 60s, reconcile()                      examined=0  sendFor 1 -> 1
+    fakeClock, advance 60s, reconcile({olderThanMs: 1_000})   examined=1  sendFor 1 -> 2
+    fakeClock, no advance,  reconcile({olderThanMs: 1_000})   examined=0  sendFor 1 -> 1
