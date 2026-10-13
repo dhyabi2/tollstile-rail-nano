@@ -26,6 +26,32 @@ money has already moved on-chain and the merchant keeps it. If you need a failed
 call to give the money back, configure a `signer`; if you cannot, that behavior is
 a deliberate choice, not a bug — make sure it is what your terms say.
 
+**Your `sendFor` must be idempotent per `context.refundOf`, or a refund whose reply
+was lost is sent twice.** Core calls `refund` again for a refund it cannot confirm,
+and both answers this rail's `lookup` can give it — `settled` and `none` — lead back
+to `performRefund`. Measured on 0.3.2 against the fake network, one failed handler
+and a `sendFor` that publishes its send and then throws:
+
+```
+after pass.complete('failed')   sendFor calls: 1   reverse sends on chain: 1
+after toll.reconcile()          sendFor calls: 2   reverse sends on chain: 2
+```
+
+That retry is deliberate, and so is the `PROVIDER_UNAVAILABLE` that causes it: a
+send that threw may have been published and only the reply lost, so reporting it as
+`rejected` would strand money the payer is owed. What the rail cannot do is tell the
+two apart — `NanoRpcRead` is a `blockInfo(hash)` lookup of the *payment* block, with
+no way to search the merchant's account for a reverse send — so only `lookup`
+returning `refunded` would stop the retry, and it cannot return that.
+
+`refundOf` is what closes it. It is the hash of the payment being reversed: single-use
+in core's ledger, so one refund per payment, and **identical on every attempt** (the
+destination and the amount too — pinned by
+`a refund whose reply was lost is sent again, with identical arguments` in
+`test/rail.test.ts`). Record it alongside the reverse send and return the hash you
+already recorded for it rather than signing a second block. Nano has no chargeback;
+a second reverse send is not recoverable.
+
 ## Proof is bound to the purchase and its payer
 
 Because Nano blocks are public and have no memo field, a payment proof must be
@@ -99,7 +125,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **70 passed**, including a rate that moves between quote and
+Rail unit tests: **72 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, rates given
 as strings, exponents and noisy floats, and the confirmation and signature gates

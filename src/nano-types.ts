@@ -45,7 +45,37 @@ export type NanoRpcRead = {
  * `sendFor` when a signer is configured.
  */
 export type NanoSigner = {
-  /** Submit a confirmed `send` from the merchant's account and return its hash. */
+  /**
+   * Submit a confirmed `send` from the merchant's account and return its hash.
+   *
+   * **`sendFor` MUST be idempotent per `context.refundOf`.** Core calls `refund`
+   * again whenever a refund is left unresolved, and a `sendFor` that publishes a
+   * new block on every call sends the payer their money TWICE off one payment --
+   * irreversibly, because Nano has no chargeback.
+   *
+   * The rail reports a throwing `sendFor` as PROVIDER_UNAVAILABLE rather than
+   * `rejected`, on purpose: the block may have been published and only the reply
+   * lost, and asserting it did not move would strand money the payer is owed. The
+   * cost of that choice is that the charge reaches `unknown` with `pending: refund`,
+   * and core's `resolveUnknown` then calls `refund` a second time -- for BOTH
+   * answers `lookup` can give it, `settled` and `none`. Only `lookup` returning
+   * `refunded` would stop it, and this rail cannot return that: `NanoRpcRead` is a
+   * `blockInfo(hash)` lookup of the PAYMENT block, with no way to search the
+   * merchant's account for a reverse send that may or may not exist.
+   *
+   * Measured on 0.3.2 against the fake network, one failed handler and a `sendFor`
+   * that publishes its send and then throws (a reply lost after the block was
+   * accepted):
+   *
+   *     after pass.complete('failed')  sendFor calls: 1   reverse sends on chain: 1
+   *     after toll.reconcile()         sendFor calls: 2   reverse sends on chain: 2
+   *
+   * So the retry is the operator's to absorb, and `refundOf` is what absorbs it.
+   * It is the hash of the payment being reversed: single-use in core's ledger, one
+   * refund per payment, and identical on every attempt (pinned by a test). Record
+   * it with the reverse send and return the hash already recorded for it instead of
+   * signing a second block.
+   */
   sendFor(destination: string, amountRaw: string, context: { readonly refundOf: string }): Promise<string>;
 };
 

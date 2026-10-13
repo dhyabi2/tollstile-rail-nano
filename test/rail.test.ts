@@ -28,7 +28,11 @@ type TollstileEvent = Parameters<NonNullable<Parameters<typeof createTollstile>[
 type Entry = Awaited<ReturnType<ReturnType<typeof setup>['enter']>>;
 
 function setup(signer?: NanoSigner) {
-  const provider = nanoProvider(MERCHANT);
+  return setupWith(nanoProvider(MERCHANT), signer);
+}
+
+/** `setup`, but over a provider the caller holds, so a signer can wrap it. */
+function setupWith(provider: ReturnType<typeof nanoProvider>, signer?: NanoSigner) {
   settledHashes = [];
   const seen = new Set<string>();
   const rail = nanoRail({
@@ -87,6 +91,16 @@ function acceptsOf(denial: unknown): { amountRaw: string; to: string; nonce: str
     quote: c?.mcp?.quote ?? '',
   };
 }
+
+/** Reconcile a charge written seconds ago.
+ *
+ * `reconcile` reads charges last updated BEFORE `now - olderThanMs`, and the ledger
+ * stamps `updatedAt` from the system clock. At `olderThanMs: 0` a charge written in
+ * the same millisecond as the call is sometimes outside the window and never
+ * examined, which makes the test a race it loses about half the time. A negative
+ * window puts the boundary just after the charge instead, so "old enough to
+ * reconcile" is a fact. */
+const RECONCILE_NOW = { olderThanMs: -1_000 } as const;
 
 async function payAndEnter(enter: ReturnType<typeof setup>['enter'], provider: ReturnType<typeof setup>['provider']): Promise<Entry> {
   const challenge = await enter();
@@ -392,6 +406,85 @@ describe('nano rail', () => {
 
     // No reverse send was recorded, because none succeeded.
     expect(provider.refundCount()).toBe(0);
+  });
+
+  it('a refund whose reply was lost is sent again, with identical arguments', async () => {
+    // The test above stops at the FIRST failure: a `sendFor` that throws leaves the
+    // charge at `unknown` with `pending: refund` and nothing sent. This is what
+    // happens next, and it is the case that comment anticipates -- "the block may
+    // have been published and only the reply lost".
+    //
+    // Core's `resolveUnknown` calls `lookup` and then `performRefund` for BOTH
+    // answers this rail can give it, `settled` and `none`. Only `refunded` would
+    // stop it, and the rail cannot return that: `NanoRpcRead` is a `blockInfo(hash)`
+    // lookup of the PAYMENT block, with no way to search the merchant's account for
+    // a reverse send that may or may not exist. So the retry reaches the signer, and
+    // a signer that signs a new block every time pays the payer TWICE off one
+    // payment -- irreversibly, because Nano has no chargeback.
+    //
+    // That makes idempotency the operator's to supply, and this test pins the one
+    // thing it can be keyed on: the arguments are IDENTICAL across both attempts, so
+    // `refundOf` (the payment hash, single-use in core's ledger) is a usable key. If
+    // that ever stops being true, a signer written against the documented contract in
+    // `NanoSigner.sendFor` would silently double-refund again, which is why this is a
+    // test and not only a comment.
+    const calls: string[] = [];
+    const provider = nanoProvider(MERCHANT);
+    const naive: NanoSigner = {
+      // The send IS published; only the reply is lost.
+      sendFor: async (destination, amountRaw, context) => {
+        calls.push(`${destination}|${amountRaw}|${context.refundOf}`);
+        await provider.sendFor(destination, amountRaw, context);
+        throw new Error('socket reset after the block was published');
+      },
+    };
+    const { enter, toll, ledger } = setupWith(provider, naive);
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+    await paid.pass.complete('failed');
+    expect(calls.length, 'one attempt from the failed handler').toBe(1);
+    expect(provider.refundCount()).toBe(1);
+
+    await toll.reconcile(RECONCILE_NOW);
+
+    // Measured, not assumed: reconciliation sends it a second time.
+    expect(calls.length, 'reconciliation calls the signer again').toBe(2);
+    expect(provider.refundCount(), 'two reverse sends on chain for one payment').toBe(2);
+    // And the key the operator is told to dedupe on is the same on both.
+    expect(calls[1]).toBe(calls[0]);
+    // ...and it is the payment's own block hash, which is what makes it a key.
+    const [refunding] = ledger.charges();
+    expect(calls[0].endsWith(`|${refunding.settlement?.reference}`), calls[0]).toBe(true);
+  });
+
+  it('a signer that dedupes on refundOf refunds exactly once across the retry', async () => {
+    // The control, and the contract `NanoSigner.sendFor` documents: record the
+    // reverse send against `refundOf` and return the recorded hash instead of
+    // signing a second block. One reverse send, one payment, nothing stranded.
+    const provider = nanoProvider(MERCHANT);
+    const published = new Map<string, string>();
+    let signed = 0;
+    const idempotent: NanoSigner = {
+      sendFor: async (destination, amountRaw, context) => {
+        const already = published.get(context.refundOf);
+        if (already !== undefined) return already;
+        signed += 1;
+        const reference = await provider.sendFor(destination, amountRaw, context);
+        published.set(context.refundOf, reference);
+        // The reply is lost on the first attempt, exactly as above.
+        throw new Error('socket reset after the block was published');
+      },
+    };
+    const { enter, toll, ledger } = setupWith(provider, idempotent);
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+    await paid.pass.complete('failed');
+    await toll.reconcile(RECONCILE_NOW);
+
+    expect(signed, 'the signer published exactly one reverse send').toBe(1);
+    expect(provider.refundCount(), 'one reverse send on chain for one payment').toBe(1);
+    const [charge] = ledger.charges();
+    expect(charge.payment, 'and the retry resolved the charge').toBe('refunded');
   });
 
   it('a repeated settle with the same key has no second effect', async () => {
