@@ -13,6 +13,7 @@ import {
   type Quote,
 } from 'tollstile';
 import { createHash } from 'node:crypto';
+import { blake2b } from './blake2b.js';
 import type { NanoRailOptions, NanoBlockInfo, NanoSignatureVerifier } from './nano-types.js';
 import {
   NANO_ASSET,
@@ -271,15 +272,44 @@ function payableOf(quote: Quote): string {
  * A Nano account as the network writes it: `nano_`/`xrb_`, then 60 base32
  * characters whose first is `1` or `3` (the 260-bit body is 4 padding bits + a
  * 256-bit public key + a 40-bit checksum, so only two values can lead).
- *
- * Shape only. The checksum is the one thing that catches a mistyped character, and
- * verifying it needs BLAKE2b with a 5-byte digest, which `node:crypto` cannot
- * produce - `createHash('blake2b512')` is fixed at 64 bytes and BLAKE2b puts the
- * digest length in its IV, so a truncation of it is a different hash. A dependency
- * for that is the operator's call, not this rail's; the shape alone catches every
- * cause measured below.
  */
-const NANO_ACCOUNT = /^(?:nano|xrb)_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/;
+const NANO_ACCOUNT = /^(?:nano|xrb)_([13][13456789abcdefghijkmnopqrstuwxyz]{59})$/;
+const NANO_BASE32 = '13456789abcdefghijkmnopqrstuwxyz';
+
+/**
+ * The merchant account in the one form the network echoes back, or `null` when it
+ * is not a Nano account at all.
+ *
+ * Shape first, then the checksum: the last 8 characters are BLAKE2b (5-byte
+ * digest) of the 32-byte public key, bytes reversed - the one thing that catches a
+ * mistyped character, which the shape alone would publish in every 402. Then the
+ * prefix: `xrb_` is the legacy spelling of the same key, but nodes name
+ * destinations `nano_`, and `verify` compares strings exactly, so an `xrb_`
+ * account is rewritten to `nano_` with the same 60-character body - otherwise every
+ * confirmed payment to it would be answered "Pay again".
+ */
+function nanoAccount(account: unknown): string | null {
+  if (typeof account !== 'string') return null;
+  const match = NANO_ACCOUNT.exec(account);
+  if (match === null) return null;
+  const body = match[1];
+  let bits = 0n;
+  for (const c of body) bits = (bits << 5n) | BigInt(NANO_BASE32.indexOf(c));
+  // 300 bits: 4 pad | 256 key | 40 checksum. The leading 1/3 keeps the pad zero.
+  if (bits >> 296n !== 0n) return null;
+  const checksum = bits & ((1n << 40n) - 1n);
+  let key = (bits >> 40n) & ((1n << 256n) - 1n);
+  const pub = new Uint8Array(32);
+  for (let i = 31; i >= 0; i--) {
+    pub[i] = Number(key & 0xffn);
+    key >>= 8n;
+  }
+  const digest = blake2b(pub, 5);
+  let expected = 0n;
+  for (let i = 4; i >= 0; i--) expected = (expected << 8n) | BigInt(digest[i]);
+  if (expected !== checksum) return null;
+  return `nano_${body}`;
+}
 
 /**
  * A Nano (XNO) settlement rail for Tollstile.
@@ -354,10 +384,11 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
   // it: the address is well-formed enough to publish in the 402, the amount and the
   // signature are right, and the only mismatch is the merchant's own setting. So it
   // is refused here, where it costs a boot instead of a payment.
-  if (typeof options.merchantAccount !== 'string' || !NANO_ACCOUNT.test(options.merchantAccount)) {
-    throw new TollstileError('CONFIG_INVALID', `nanoRail needs merchantAccount to be a Nano address exactly as the network writes it (nano_ or xrb_ and 60 base32 characters, no surrounding whitespace); got ${JSON.stringify(options.merchantAccount)}. verify() compares it to the destination the node reports, so anything else refuses every payment after it has confirmed on-chain.`);
+  const configured: unknown = options.merchantAccount;
+  const merchant = nanoAccount(configured);
+  if (merchant === null) {
+    throw new TollstileError('CONFIG_INVALID', `nanoRail needs merchantAccount to be a Nano address exactly as the network writes it (nano_ or xrb_, then 60 base32 characters starting with 1 or 3, a valid checksum, no surrounding whitespace); got ${JSON.stringify(configured)}. verify() compares it to the destination the node reports, so anything else refuses every payment after it has confirmed on-chain.`);
   }
-  const merchant = options.merchantAccount;
   const rpc = options.rpc;
   const verifier = options.verifier;
 
