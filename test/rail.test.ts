@@ -15,7 +15,7 @@ import {
   NANO_SIGNATURE_META,
 } from '../src/nano-types.js';
 
-const MERCHANT = 'nano_3merchantaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const MERCHANT = 'nano_3merchantaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const XNO_PER_USD = '0.01'; // $1 -> 1e28 raw
 
 /** Tracks settled blocks the toll records, deduped by reference (core fires
@@ -163,6 +163,48 @@ describe('nano rail', () => {
     if (paid.kind !== 'admitted') throw new Error('expected admission');
     expect((await paid.pass.complete('failed')).settlement).toBe('none');
     expect(p2.refundCount()).toBe(1);
+  });
+
+  it('fails closed at construction for a merchantAccount that is not a Nano address', () => {
+    // The third option with no guard, and the one that is the DESTINATION of every
+    // payment the rail asks for. README's own Install snippet reads
+    // `process.env.NANO_MERCHANT_ACCOUNT!`, where `!` is a TypeScript non-null
+    // assertion: it silences the compiler and does nothing at runtime. Measured on
+    // the tree before this guard, with the variable unset, the rail was built from
+    // `undefined` without a word and the 402 it served carried:
+    //
+    //     accepts.to        : undefined
+    //     mcp.to            : undefined
+    //     accepts.amountRaw : 10000000000000000008166705475
+    //
+    // An amount and NO destination. And the destination check inside `verify` goes
+    // vacuous in that state -- `block.destination !== merchant` compares `undefined`
+    // to `undefined`, which is false -- so against a provider echoing the same blank
+    // the payment was ADMITTED. Against a real RPC, which returns a real address,
+    // the same comparison refuses every payment `proof_invalid` AFTER the payer's
+    // send has confirmed on-chain, and Nano has no chargeback.
+    const base = { rpc: nanoProvider(MERCHANT), xnoPerUsd: XNO_PER_USD, verifier: nanoProvider(MERCHANT) };
+    for (const bad of [
+      undefined,          // the unset env var in README's own snippet
+      null,
+      '',                 // an env var that is set but empty
+      'not-an-address',
+      'nano_TYPO',
+      'nano_',
+      MERCHANT.slice(0, -1),      // 59 characters: one short
+      `${MERCHANT}a`,             // 61 characters: one long
+      MERCHANT.toUpperCase(),     // a Nano address is lower case
+      MERCHANT.replace('3', '2'), // '2' is not in Nano's base32 alphabet
+      ` ${MERCHANT}`,             // whitespace from a config file
+      123,
+    ]) {
+      expect(() => nanoRail({ ...base, merchantAccount: bad as never })).toThrowError(/merchantAccount/);
+    }
+    // Both live prefixes for a well-formed account still construct: they are two
+    // encodings of the same 32-byte public key and `xrb_` is still what some
+    // wallets display.
+    expect(() => nanoRail({ ...base, merchantAccount: MERCHANT })).not.toThrow();
+    expect(() => nanoRail({ ...base, merchantAccount: MERCHANT.replace('nano_', 'xrb_') })).not.toThrow();
   });
 
   it('rejects a proof that points at a block that does not exist', async () => {

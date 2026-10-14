@@ -99,7 +99,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **70 passed**, including a rate that moves between quote and
+Rail unit tests: **71 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, rates given
 as strings, exponents and noisy floats, and the confirmation and signature gates
@@ -163,6 +163,12 @@ import { nanoRail } from 'tollstile-rail-nano';
 
 const toll = createTollstile({
   rails: [nanoRail({
+    // Required, and checked at construction: a `nano_`/`xrb_` address, 60 base32
+    // characters. The `!` below is a TYPE assertion only -- it does nothing at
+    // runtime -- so an unset variable used to build a rail that challenged payers
+    // with no destination at all and then refused their payment after it had
+    // confirmed on-chain. `nanoRail` now throws CONFIG_INVALID instead. The shape
+    // is checked, not the checksum, so a well-shaped typo still costs a payment.
     merchantAccount: process.env.NANO_MERCHANT_ACCOUNT!,
     rpc: { blockInfo: (h) => /* your Nano RPC read */ },
     signer: { sendFor: (dest, raw, ctx) => /* your signer (for refunds) */ },

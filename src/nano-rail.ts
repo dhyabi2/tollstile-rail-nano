@@ -49,6 +49,12 @@ const NONCE_MODULUS = 10n ** NONCE_DIGITS;
 const MICROS_TO_RAW_SCALE = 24;
 /** A plain non-negative decimal: digits, optionally a point and more digits. No sign, no exponent. */
 const DECIMAL = /^(\d+)(?:\.(\d+))?$/;
+/**
+ * The shape of a Nano account: `nano_`/`xrb_` then 60 characters of Nano's base32
+ * alphabet, the first of which encodes the four padding bits and so is `1` or `3`.
+ * Used only on the merchant account the operator configures, at construction.
+ */
+const NANO_ACCOUNT = /^(?:nano|xrb)_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/;
 
 type Decimal = { readonly digits: bigint; readonly decimals: number };
 
@@ -321,6 +327,38 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
   // 0.2.x would otherwise have it silently ignored and stop booking payments.
   if ((options as { onSettled?: unknown }).onSettled !== undefined) {
     throw new TollstileError('CONFIG_INVALID', 'nanoRail no longer accepts onSettled (it fired again on a replay). Use createTollstile({ onEvent }) and book on `authorization.opened` with `created: true`, or `charge.moved`; core emits those once, after its ledger has decided.');
+  }
+  // And the merchant account itself, for the same reason and at the same moment.
+  // `merchantAccount` is the one option with no guard at all, and it is the
+  // destination of every payment this rail asks for: `offer` puts it in
+  // `details.to`, `challenge` copies that into `accepts.to` and `mcp.to`, and
+  // `verify` compares `block.destination` against it.
+  //
+  // The README's own Install snippet is `process.env.NANO_MERCHANT_ACCOUNT!`, and
+  // the `!` is a TypeScript non-null assertion: it silences the compiler and does
+  // nothing at runtime. With the variable unset the rail was built from
+  // `undefined` without a word, and measured on the unmodified tree the 402 it
+  // then served carried:
+  //
+  //     accepts.to        : undefined
+  //     mcp.to            : undefined
+  //     accepts.amountRaw : 10000000000000000008166705475
+  //
+  // A paying agent is told an amount and NO destination. Worse, the destination
+  // guard in `verify` turns vacuous in that state -- `block.destination !==
+  // merchant` compares `undefined` to `undefined`, which is false -- so against a
+  // provider that echoes the same blank the payment was ADMITTED. Against a real
+  // RPC, which returns a real address for a real block, the comparison is true
+  // instead and every payment is refused `proof_invalid` AFTER the payer's send
+  // has confirmed on-chain, where Nano has no chargeback. An empty string or a
+  // mistyped address lands in the same place by the same route.
+  //
+  // So the shape is checked here, where it is still free, rather than discovered
+  // by the first payer. Shape only: the five-byte blake2b checksum that catches a
+  // single mistyped character needs a 40-bit blake2b, which `node:crypto` does not
+  // expose, so a well-shaped typo still reaches `verify` and is refused there.
+  if (typeof options.merchantAccount !== 'string' || !NANO_ACCOUNT.test(options.merchantAccount)) {
+    throw new TollstileError('CONFIG_INVALID', `nanoRail requires merchantAccount to be a Nano address (nano_ or xrb_ then 60 base32 characters); got ${JSON.stringify(options.merchantAccount)}. It is the destination of every payment this rail challenges for, so an unset or mistyped value would be advertised to payers and then refused after their send had already confirmed on-chain.`);
   }
   const merchant = options.merchantAccount;
   const rpc = options.rpc;
