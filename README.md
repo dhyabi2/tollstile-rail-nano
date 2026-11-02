@@ -156,6 +156,10 @@ below, so `npm i tollstile-rail-nano` installs a rail that can be paid once and
 charge twice.** Require `0.3.2` or later; until it is on npm, install this
 repository directly.
 
+```
+npm i "github:dhyabi2/tollstile-rail-nano#v0.3.2"   # the tagged release; its `prepare` script builds dist
+```
+
 Measured against the real published package in a fresh project
 (`npm i tollstile@0.1.2 tollstile-rail-nano@0.3.1`), driving core with a fake
 network whose only Nano-specific behaviour is that `block_info` answers the same
