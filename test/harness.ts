@@ -3,7 +3,7 @@ import { nanoProvider } from '../src/nano-provider.js';
 import { nanoRail } from '../src/nano-rail.js';
 import { NANO_BLOCK_HEADER, NANO_QUOTE_HEADER, NANO_SIGNATURE_HEADER } from '../src/nano-types.js';
 
-export const MERCHANT = 'nano_3merchantaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+export const MERCHANT = 'nano_1h6o1hmf9s19ph6onk7buwbttjb9khikmo5pnjbr68r3thsxhunmrh4fhjuu';
 export const XNO_PER_USD = '0.01'; // 1 XNO = $100; $1 -> 0.01 XNO -> 1e28 raw
 
 /**

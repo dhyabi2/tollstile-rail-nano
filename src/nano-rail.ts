@@ -13,6 +13,7 @@ import {
   type Quote,
 } from 'tollstile';
 import { createHash } from 'node:crypto';
+import { blake2b } from './blake2b.js';
 import type { NanoRailOptions, NanoBlockInfo, NanoSignatureVerifier } from './nano-types.js';
 import {
   NANO_ASSET,
@@ -268,6 +269,49 @@ function payableOf(quote: Quote): string {
 }
 
 /**
+ * A Nano account as the network writes it: `nano_`/`xrb_`, then 60 base32
+ * characters whose first is `1` or `3` (the 260-bit body is 4 padding bits + a
+ * 256-bit public key + a 40-bit checksum, so only two values can lead).
+ */
+const NANO_ACCOUNT = /^(?:nano|xrb)_([13][13456789abcdefghijkmnopqrstuwxyz]{59})$/;
+const NANO_BASE32 = '13456789abcdefghijkmnopqrstuwxyz';
+
+/**
+ * The merchant account in the one form the network echoes back, or `null` when it
+ * is not a Nano account at all.
+ *
+ * Shape first, then the checksum: the last 8 characters are BLAKE2b (5-byte
+ * digest) of the 32-byte public key, bytes reversed - the one thing that catches a
+ * mistyped character, which the shape alone would publish in every 402. Then the
+ * prefix: `xrb_` is the legacy spelling of the same key, but nodes name
+ * destinations `nano_`, and `verify` compares strings exactly, so an `xrb_`
+ * account is rewritten to `nano_` with the same 60-character body - otherwise every
+ * confirmed payment to it would be answered "Pay again".
+ */
+function nanoAccount(account: unknown): string | null {
+  if (typeof account !== 'string') return null;
+  const match = NANO_ACCOUNT.exec(account);
+  if (match === null) return null;
+  const body = match[1];
+  let bits = 0n;
+  for (const c of body) bits = (bits << 5n) | BigInt(NANO_BASE32.indexOf(c));
+  // 300 bits: 4 pad | 256 key | 40 checksum. The leading 1/3 keeps the pad zero.
+  if (bits >> 296n !== 0n) return null;
+  const checksum = bits & ((1n << 40n) - 1n);
+  let key = (bits >> 40n) & ((1n << 256n) - 1n);
+  const pub = new Uint8Array(32);
+  for (let i = 31; i >= 0; i--) {
+    pub[i] = Number(key & 0xffn);
+    key >>= 8n;
+  }
+  const digest = blake2b(pub, 5);
+  let expected = 0n;
+  for (let i = 4; i >= 0; i--) expected = (expected << 8n) | BigInt(digest[i]);
+  if (expected !== checksum) return null;
+  return `nano_${body}`;
+}
+
+/**
  * A Nano (XNO) settlement rail for Tollstile.
  *
  * Flow `upfront`: the payer's confirmed `send` block is the payment and it has
@@ -322,7 +366,36 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
   if ((options as { onSettled?: unknown }).onSettled !== undefined) {
     throw new TollstileError('CONFIG_INVALID', 'nanoRail no longer accepts onSettled (it fired again on a replay). Use createTollstile({ onEvent }) and book on `authorization.opened` with `created: true`, or `charge.moved`; core emits those once, after its ledger has decided.');
   }
-  const merchant = options.merchantAccount;
+  // And the merchant's own account, for the same reason and with a worse ending.
+  // `verify` admits a block only when `block.destination === merchantAccount`, an
+  // exact string compare against the account the node names - so a
+  // `merchantAccount` that is not EXACTLY what the network will echo back refuses
+  // every real payment, one at a time, after each payer's send has confirmed
+  // on-chain. Measured on master with `merchantAccount: `${MERCHANT}\n`` (one
+  // trailing newline, which is what an env file, a JSON config or a copied line
+  // gives you), a confirmed send of the exact challenged amount to this merchant:
+  //
+  //     challenge accepts.to -> "nano_3merchant...\n"   (the padding is published too)
+  //     the paid request     -> denied proof_invalid, retryable: true, action: "pay",
+  //                             "The nano payment was not accepted. Pay again using this response."
+  //
+  // The gate asks for the money again, on an asset with no chargeback, and will do
+  // so for every payer until someone reads the config. Nothing downstream can catch
+  // it: the address is well-formed enough to publish in the 402, the amount and the
+  // signature are right, and the only mismatch is the merchant's own setting. So it
+  // is refused here, where it costs a boot instead of a payment.
+  const configured: unknown = options.merchantAccount;
+  const merchant = nanoAccount(configured);
+  if (merchant === null) {
+    // JSON.stringify throws on a BigInt or a cycle; the refusal must still be CONFIG_INVALID.
+    let shown: string;
+    try {
+      shown = JSON.stringify(configured) ?? String(configured);
+    } catch {
+      shown = typeof configured;
+    }
+    throw new TollstileError('CONFIG_INVALID', `nanoRail needs merchantAccount to be a Nano address exactly as the network writes it (nano_ or xrb_, then 60 base32 characters starting with 1 or 3, a valid checksum, no surrounding whitespace); got ${shown}. verify() compares it to the destination the node reports, so anything else refuses every payment after it has confirmed on-chain.`);
+  }
   const rpc = options.rpc;
   const verifier = options.verifier;
 
@@ -432,7 +505,11 @@ export function nanoRail(options: NanoRailOptions): ReturnType<typeof createRail
       if (confirmed !== true && confirmed !== 'true') {
         return { status: 'invalid', reason: 'proof_pending', proofId: hash };
       }
-      if (block.destination !== merchant || block.subtype !== 'send') return { status: 'invalid', reason: 'proof_invalid', proofId: hash };
+      // The same normalisation as the configured side: a node or adapter that names
+      // the destination `xrb_` is naming the same key. A non-string never matches.
+      const destination: unknown = block.destination;
+      const reported = typeof destination === 'string' && destination.startsWith('xrb_') ? `nano_${destination.slice(4)}` : destination;
+      if (reported !== merchant || block.subtype !== 'send') return { status: 'invalid', reason: 'proof_invalid', proofId: hash };
       // EXACT match, not minimum: a different quote's amount or an unrelated send
       // must not redeem this one.
       if (block.amountRaw !== expectedRaw) return { status: 'invalid', reason: 'proof_invalid', proofId: hash };
