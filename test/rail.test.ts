@@ -1,7 +1,9 @@
 import { createTollstile, memoryLedger, TollstileError } from 'tollstile';
 import { httpContext, mcpContext, railConformance } from 'tollstile/testing';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { blake2b } from '../src/blake2b.js';
 import { nanoProvider } from '../src/nano-provider.js';
 import { nanoRail, parseRate, toRaw, type NanoData } from '../src/nano-rail.js';
 import { harness } from './harness.js';
@@ -15,7 +17,7 @@ import {
   NANO_SIGNATURE_META,
 } from '../src/nano-types.js';
 
-const MERCHANT = 'nano_3merchantaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const MERCHANT = 'nano_1h6o1hmf9s19ph6onk7buwbttjb9khikmo5pnjbr68r3thsxhunmrh4fhjuu';
 const XNO_PER_USD = '0.01'; // $1 -> 1e28 raw
 
 /** Tracks settled blocks the toll records, deduped by reference (core fires
@@ -27,12 +29,13 @@ let settledHashes: string[] = [];
 type TollstileEvent = Parameters<NonNullable<Parameters<typeof createTollstile>[0]['onEvent']>>[0];
 type Entry = Awaited<ReturnType<ReturnType<typeof setup>['enter']>>;
 
-function setup(signer?: NanoSigner) {
-  const provider = nanoProvider(MERCHANT);
+function setup(signer?: NanoSigner, merchantAccount: string = MERCHANT, networkAccount: string = MERCHANT) {
+  // The fake network names the merchant `networkAccount` (`nano_`, as a real node does, by default).
+  const provider = nanoProvider(networkAccount);
   settledHashes = [];
   const seen = new Set<string>();
   const rail = nanoRail({
-    merchantAccount: MERCHANT,
+    merchantAccount,
     rpc: provider,
     signer: signer ?? provider,
     verifier: provider,
@@ -117,6 +120,154 @@ describe('nano rail', () => {
     expect(completion.settlement).toBe('settled');
     // Core recorded exactly one settlement via onEvent (not a merchant-side hook).
     expect(settledHashes.length).toBe(1);
+  });
+
+  it('fails closed at construction for a merchantAccount the network will not echo back', async () => {
+    // The third option with this hazard, and the one with the worst ending.
+    // `verify` admits a block only when `block.destination === merchantAccount` --
+    // an exact string compare against the account the node names -- so a
+    // merchantAccount that is not EXACTLY what the network writes refuses every
+    // real payment, one payer at a time, after each send has confirmed on-chain.
+    //
+    // One trailing newline is enough, and that is what an env file, a JSON config
+    // or a copied line hands you. Measured on master, with the payer sending the
+    // exact challenged amount to this merchant:
+    //
+    //     challenge accepts.to -> "nano_...\n"     (the padding is published too)
+    //     the paid request     -> denied proof_invalid, retryable: true,
+    //                             action: "pay", "Pay again using this response."
+    //
+    // The gate asks for the money again, on an asset with no chargeback, and goes
+    // on doing it until someone reads the config. Nothing downstream can catch it:
+    // the address is well-formed enough to publish in the 402, and the amount and
+    // the signature are both right.
+    const provider = nanoProvider(MERCHANT);
+    const base = { rpc: provider, signer: provider, verifier: provider, xnoPerUsd: XNO_PER_USD };
+    const bad = [
+      `${MERCHANT}\n`,              // the measured case: a trailing newline
+      ` ${MERCHANT}`,               // and a leading space
+      `${MERCHANT} `,
+      MERCHANT.slice(0, -1),        // one character short
+      `${MERCHANT}a`,               // one character long
+      MERCHANT.toUpperCase(),       // not the casing the network writes
+      MERCHANT.replace('nano_1', 'nano_2'),   // only 1 and 3 can lead a Nano body
+      MERCHANT.replace('nano_', 'nanoo_'),
+      MERCHANT.replace('h', 'l'),   // `l`, `0`, `2` and `v` are not in Nano's base32
+      '',
+      undefined,
+      null,
+      42,
+    ];
+    for (const account of bad) {
+      expect(
+        () => nanoRail({ ...base, merchantAccount: account as never }),
+        `merchantAccount ${JSON.stringify(account)} was accepted`,
+      ).toThrowError(/merchantAccount/);
+    }
+    // Both prefixes construct; the legacy `xrb_` is published and compared as
+    // `nano_` (see the next test).
+    for (const good of [MERCHANT, MERCHANT.replace('nano_', 'xrb_')]) {
+      expect(() => nanoRail({ ...base, merchantAccount: good })).not.toThrow();
+    }
+    // The guard is at construction, so a rail that DID construct still admits a
+    // real payment: the control that this refusal costs nothing at verify time.
+    const { enter, provider: p2 } = setup();
+    const paid = await payAndEnter(enter, p2);
+    expect(paid.kind).toBe('admitted');
+  });
+
+  it('admits a payment to an xrb_ merchantAccount, which the network names nano_', async () => {
+    // `xrb_` is the legacy spelling of the same key, and the shape check accepts
+    // it, but a node reports every destination as `nano_` and verify compares
+    // strings exactly. Without normalising, every confirmed payment to an `xrb_`
+    // merchant was answered "Pay again". The rail rewrites it to `nano_` once, at
+    // construction, and uses that in the challenge and in the compare.
+    const { enter, provider } = setup(undefined, MERCHANT.replace('nano_', 'xrb_'));
+    const challenge = await enter();
+    if (challenge.kind !== 'denied') throw new Error('expected a 402');
+    expect(acceptsOf(challenge.denial).to).toBe(MERCHANT);
+    const paid = await payAndEnter(enter, provider);
+    if (paid.kind !== 'admitted') throw new Error(`expected admission, got ${paid.denial.error.code}`);
+    expect(paid.kind).toBe('admitted');
+  });
+
+  it('compares a destination the network names xrb_ on the same normalisation', async () => {
+    // An adapter (or the /testing nanoProvider) may report the destination as
+    // `xrb_`. That is the same key, so it must be admitted whichever prefix the
+    // merchant configured - and a different key must still be refused.
+    const XRB = MERCHANT.replace('nano_', 'xrb_');
+    for (const [configured, network] of [[XRB, XRB], [MERCHANT, XRB]] as const) {
+      const { enter, provider } = setup(undefined, configured, network);
+      const paid = await payAndEnter(enter, provider);
+      if (paid.kind !== 'admitted') throw new Error(`${configured} / ${network}: expected admission, got ${paid.denial.error.code}`);
+      expect(paid.kind).toBe('admitted');
+    }
+    const OTHER = 'xrb_1banexkcfuieufzxksfrxqf6xy8e57ry1zdtq9yn7jntzhpwu4pg4hajojmq';
+    const { enter, provider } = setup(undefined, MERCHANT, OTHER);
+    const refused = await payAndEnter(enter, provider);
+    expect(refused.kind).toBe('denied');
+  });
+
+  it('refuses with CONFIG_INVALID a merchantAccount JSON cannot print', () => {
+    const provider = nanoProvider(MERCHANT);
+    const base = { rpc: provider, signer: provider, verifier: provider, xnoPerUsd: XNO_PER_USD };
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    for (const bad of [1n, circular]) {
+      let caught: unknown;
+      try {
+        nanoRail({ ...base, merchantAccount: bad as never });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(TollstileError);
+      expect((caught as TollstileError).code).toBe('CONFIG_INVALID');
+    }
+  });
+
+  it('refuses at construction a merchantAccount whose checksum does not match', () => {
+    // The last 8 characters are BLAKE2b (5-byte digest) of the public key, bytes
+    // reversed. A mistyped character keeps the shape and breaks the checksum, so
+    // it is caught here instead of being published in every 402.
+    const provider = nanoProvider(MERCHANT);
+    const base = { rpc: provider, signer: provider, verifier: provider, xnoPerUsd: XNO_PER_USD };
+    const real = [
+      MERCHANT,
+      'nano_1banexkcfuieufzxksfrxqf6xy8e57ry1zdtq9yn7jntzhpwu4pg4hajojmq', // examples/rpc-network-check.mjs
+      'nano_3nhh9atngrher9zzackjhxhof3ijnxxp8paer9xo9z7utj69icg8h8weyuxh',
+    ];
+    for (const good of real) {
+      expect(() => nanoRail({ ...base, merchantAccount: good }), good).not.toThrow();
+    }
+    const typos = [
+      MERCHANT.replace('nano_1h6o', 'nano_1h6p'),      // in the key
+      `${MERCHANT.slice(0, -1)}${MERCHANT.endsWith('u') ? 'w' : 'u'}`, // in the checksum
+      real[1].replace('banex', 'banux'),
+    ];
+    for (const bad of typos) {
+      expect(() => nanoRail({ ...base, merchantAccount: bad }), bad).toThrowError(/checksum/);
+    }
+  });
+
+  it('blake2b matches node:crypto blake2b512 at outlen 64', () => {
+    // The checksum above rests on this module; node:crypto can only check the
+    // 64-byte digest, which exercises the same compression, padding and counter.
+    const inputs = [
+      new Uint8Array(0),
+      new TextEncoder().encode('abc'),
+      new Uint8Array(32).fill(7),
+      Uint8Array.from({ length: 128 }, (_, i) => i),
+      Uint8Array.from({ length: 129 }, (_, i) => (i * 31) & 0xff),
+      Uint8Array.from({ length: 1000 }, (_, i) => (i * 131 + 7) & 0xff),
+    ];
+    for (const input of inputs) {
+      const want = createHash('blake2b512').update(input).digest('hex');
+      expect(Buffer.from(blake2b(input, 64)).toString('hex'), `length ${input.length}`).toBe(want);
+    }
+    // And the 5-byte digest is not a truncation of the 64-byte one (the outlen is
+    // in the IV), which is why node:crypto could not do this.
+    const key = new Uint8Array(32);
+    expect(Buffer.from(blake2b(key, 5)).toString('hex')).not.toBe(Buffer.from(blake2b(key, 64)).toString('hex').slice(0, 10));
   });
 
   it('fails closed at construction for a verifier that is present but unusable', () => {
