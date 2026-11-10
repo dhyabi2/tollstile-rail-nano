@@ -26,6 +26,41 @@ money has already moved on-chain and the merchant keeps it. If you need a failed
 call to give the money back, configure a `signer`; if you cannot, that behavior is
 a deliberate choice, not a bug — make sure it is what your terms say.
 
+Within one rail instance the rail sends **at most one** reverse send per
+payment. If `sendFor` throws, or resolves to anything other than a block hash
+of 64 hex digits (or `{ block }` / `{ hash }` holding one), the send may still
+have been published, so the charge is left `unknown` and is not sent again by `reconcile()`. A socket error code (`ECONNREFUSED`,
+`ENOTFOUND`, a timeout) does not change that: it describes the last connection
+attempt, not whether an earlier attempt or a confirmation poll came after a
+published block. A second refund for a payment whose send is still running is
+refused with its own "already in flight" error.
+
+- **Operators:** check the merchant account history. If no send to the payer is
+  there, call `rail.forgetRefund(paymentHash)` (any case) and the next reconcile
+  sends it once. `forgetRefund` never clears a refund that was sent or is still
+  in flight.
+- **Signer authors:** throw `RefundNotSentError` (exported) from `sendFor` only
+  when you know nothing was broadcast, i.e. you failed before any `process` RPC
+  was attempted for this refund (reading `account_info`, generating work,
+  signing). Never throw it after ANY earlier `process` attempt, even if the last
+  attempt failed before broadcast: an earlier one may have published. The rail then
+  retries on the next reconcile with no operator step. It is recognised by
+  `name === 'RefundNotSentError'` and `notBroadcast === true`, so a copy from a
+  duplicate install of this package works too. The bundled test `nanoProvider`
+  never throws it: its fake send has no step before the publish.
+
+### Refund limits
+
+- **The guard is in memory, per rail instance.** A reconcile in a fresh process
+  (the `tollstile reconcile` CLI, a cron job) or after a restart does not know
+  about earlier sends, and can send a refund a second time if the earlier send
+  was published but its reply was lost. A signer whose `sendFor` is idempotent on
+  `context.refundOf` avoids this.
+- The per-instance record is never pruned: one small entry per refunded payment
+  for the life of the process.
+- A `sendFor` that never settles (neither resolves nor rejects) leaves its
+  refund in flight until the process restarts; give your signer its own timeout.
+
 ## Proof is bound to the purchase and its payer
 
 Because Nano blocks are public and have no memo field, a payment proof must be
@@ -34,7 +69,7 @@ tied to the specific purchase to be safe (Tollstile#47 and #49 reviews):
 1. **Exact amount per quote.** The payable amount is the quoted price in raw plus
    a per-quote nonce. The price is rounded down to a multiple of 10^10 raw
    (under 1e-20 XNO) so it occupies the high digits, and the nonce — SHA-256 of
-   the quote id, reduced below 10^10 — the low 10 digits. **That nonce is ~33
+   the quote id, its last 8 bytes reduced below 10^10 — the low 10 digits. **That nonce is ~33
    bits: it makes two quotes' amounts differ with high probability, not with
    certainty.** It is not what makes a proof safe. `verify` accepts only an
    **exact** match, and reads the payable amount from the nano offer the quote
@@ -99,7 +134,7 @@ The two skipped cases are the settle-time fault cases (lost settlement response,
 failure before any effect): a Nano payment has already moved on-chain at
 verification, so there is no settle-time capture for them to act on.
 
-Rail unit tests: **70 passed**, including a rate that moves between quote and
+Rail unit tests: **90 passed**, including a rate that moves between quote and
 verify, core's events counted raw under replay and `Idempotency-Key` retries,
 a settle actually repeated with the same key, the MCP `_meta` path, rates given
 as strings, exponents and noisy floats, and the confirmation and signature gates
@@ -115,15 +150,19 @@ live network, read-only.
 
 ## Do not install the npm `latest`: every published version settles twice
 
-**npm `latest` is `0.3.1`, published 2026-09-24. This repository is `0.3.2`. The
+**npm `latest` is `0.3.1`, published 2026-09-24. This repository is `0.4.0`. The
 four versions on npm (`0.1.0`, `0.2.0`, `0.3.0`, `0.3.1`) all pre-date the fix
 below, so `npm i tollstile-rail-nano` installs a rail that can be paid once and
-charge twice.** Require `0.3.2` or later; until it is on npm, install this
+charge twice.** Require `0.4.0` or later; until it is on npm, install this
 repository directly.
 
 ```
-npm i "github:dhyabi2/tollstile-rail-nano#v0.3.2"   # the tagged release; its `prepare` script builds dist
+npm i "github:dhyabi2/tollstile-rail-nano#master"   # its `prepare` script builds dist
 ```
+
+There is no `v0.4.0` tag yet; one will follow the merge of pull request #21. Do
+not install the existing `v0.3.2` tag: it predates the fixes in "Upgrading to
+0.4.0" below (it still has the nonce regression and no refund guard).
 
 Measured against the real published package in a fresh project
 (`npm i tollstile@0.1.2 tollstile-rail-nano@0.3.1`), driving core with a fake
@@ -144,12 +183,12 @@ VULNERABLE: 2 charges settled off 1 payment(s)
 
 Two defects reach a payer in those versions, both fixed here:
 
-1. **One confirmed send settles two charges (`0.3.2`).** `verify` used the hash as
+1. **One confirmed send settles two charges (`0.4.0`).** `verify` used the hash as
    the payer typed it for `proofId`, and core's single-use check is derived from
    `proofId`, so the payer chose the identity of their own payment. A Nano block
    hash is case-insensitive on the network, so `ABCD…` and `abcd…` are one block
-   and two proofs. `0.3.2` canonicalises the hash first.
-2. **A paid request answered `quote_invalid` (`0.3.2`).** The quote token was read
+   and two proofs. `0.4.0` canonicalises the hash first.
+2. **A paid request answered `quote_invalid` (`0.4.0`).** The quote token was read
    with `??`, which is nullish, so an HTTP header present but EMPTY won over the
    quote in the MCP `_meta` — exactly what a client echoing the challenge's
    prefilled headers sends over a Streamable-HTTP carrier. The payer's send is
@@ -158,6 +197,36 @@ Two defects reach a payer in those versions, both fixed here:
 
 Publishing is not something this repository can do for you; the version here is
 the fixed one.
+
+## Upgrading to 0.4.0
+
+- **Refunds:** the double-refund guard is in memory per rail instance; see
+  "Refund limits" above. A reconcile in a fresh process (the `tollstile
+  reconcile` CLI or cron) or after a restart can send a refund a second time if
+  the earlier send published but its reply was lost, unless `sendFor` is
+  idempotent on `refundOf`. A failed refund now waits for `forgetRefund(hash)`
+  instead of being retried, unless the signer threw `RefundNotSentError`.
+- **Block hashes are upper-cased.** The proof id and the settlement reference
+  are now the upper-case hash. Drain, or let outstanding quotes expire, before
+  upgrading, and do not run 0.3.1 and 0.4.0 instances against one ledger: the
+  same block would have two proof ids.
+- **Configurations that now throw `CONFIG_INVALID` at construction:** passing
+  `onSettled`; `signer: null` or a signer without `sendFor()`; a verifier
+  without `verify()`.
+- **Stricter reads:** the verifier must return exactly `true` (not a truthy
+  value), and `block_info`'s `confirmed` must be `true` or `"true"`.
+- **`rpc.blockInfo` is called with the upper-cased hash.** A case-sensitive RPC
+  adapter, cache or test fake must normalise the hash itself.
+- **`sendFor` results:** anything other than a 64-hex block hash string, or an
+  RPC body `{ block }` / `{ hash }` holding one, is now treated as a failed
+  refund (not re-sent until `forgetRefund`, or a restart: see Refund limits).
+  References are upper-cased.
+- **Type:** `nanoRail` now returns `NanoRail`, which adds `forgetRefund`; a stub
+  typed as `ReturnType<typeof nanoRail>` needs that method.
+- **Testing provider hashes:** `nanoProvider` from `tollstile-rail-nano/testing`
+  now issues 64-hex block hashes beginning `FA11ED...` instead of `fail_...`
+  strings. A test that matches on the `fail_` prefix or the old length must
+  match the new shape.
 
 ## Install
 
