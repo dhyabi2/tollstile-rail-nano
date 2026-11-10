@@ -1,11 +1,16 @@
 # Changelog
 
-Versions on npm: 0.1.0, 0.2.0, 0.3.0, 0.3.1. **0.3.2 is tagged in git but not published**; install it from the tag:
-`npm i "github:dhyabi2/tollstile-rail-nano#v0.3.2"` (the `prepare` script builds `dist`).
+Versions on npm: 0.1.0, 0.2.0, 0.3.0, 0.3.1. **0.4.0 is neither tagged nor published yet**; until it is, install from `master`:
+`npm i "github:dhyabi2/tollstile-rail-nano#master"` (the `prepare` script builds `dist`). A `v0.4.0` tag will follow the merge of pull request #21.
 
-## 0.3.2 (not yet on npm)
+**The existing git tag `v0.3.2` (`d519b58`) does NOT contain these fixes**: it is `master` before pull request #21, with the
+nonce regression and without the refund guard. Do not install it. 0.3.2 was never published to npm.
 
-Everything on `master` since 0.3.1, plus the three release blockers from pull request #21.
+## 0.4.0 (not yet on npm)
+
+Everything on `master` since 0.3.1, plus the three release blockers from pull request #21. A minor version, not a patch:
+it adds exports (`RefundNotSentError`, `forgetRefund`), changes `nanoRail`'s return type, makes `sendFor` results stricter
+and changes the testing provider's hash shape (see the README, "Upgrading to 0.4.0").
 
 - **Money-safety (every published version is exposed to the first two):**
   - One confirmed send could settle two charges, by block-hash letter case (#15, #16).
@@ -13,13 +18,15 @@ Everything on `master` since 0.3.1, plus the three release blockers from pull re
   - An unconfirmed or unsigned block could be admitted as payment (#18); `lookup` read the confirmation for truthiness (#19).
 - **Release blockers fixed on the #21 branch:**
   1. An empty npm package: `dist/` is gitignored and nothing built it. `prepare` builds it; `npm pack --dry-run` from a clean tree lists 17 files.
-  2. A nonce regression: 0.3.2 reduced the whole SHA-256 of the quote id, 0.3.1 its last 8 bytes, so every payable amount changed and
+  2. A nonce regression: the tagged `v0.3.2` reduced the whole SHA-256 of the quote id, 0.3.1 its last 8 bytes, so every payable amount changed and
      quotes issued by 0.3.1 could not be paid after an upgrade. Restored; q_1 -> 8247539591 is pinned from the published 0.3.1.
   3. A double refund on reconcile: the rail now sends at most one reverse send per payment hash within a rail instance.
      A send that threw stays `unknown` and is not re-sent; `rail.forgetRefund(hash)` releases it deliberately.
      The record is per rail instance: a fresh process still re-sends unless the signer is idempotent on `context.refundOf`.
+- Testing provider: `nanoProvider` from `tollstile-rail-nano/testing` now issues 64-hex block hashes beginning `FA11ED...`
+  instead of `fail_...` strings; a test matching the `fail_` prefix must match the new shape.
 - Known gap, not in this release: `merchantAccount` is not validated at construction (open pull request #22); an `xrb_` address or a mistyped one refuses every payment after it confirmed.
-- Tests: 90 rail cases + 7 conformance (2 skipped by design) at the time of writing; the README count is checked by a law.
+- Tests: 90 rail cases + 9 conformance (2 skipped by design) + 5 release laws at the time of writing (102 passed, 2 skipped); the README count is checked by a law.
 
 ## 0.3.1 (npm)
 
