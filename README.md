@@ -157,8 +157,12 @@ charge twice.** Require `0.4.0` or later; until it is on npm, install this
 repository directly.
 
 ```
-npm i "github:dhyabi2/tollstile-rail-nano#master"   # its `prepare` script builds dist
+npm i "github:dhyabi2/tollstile-rail-nano#93186495817c631cf05f0b6d21d2d545fd8d6b22"
 ```
+
+That commit is the tested `0.4.0` (its `prepare` script builds dist). npm's
+registry still serves the older `0.3.1`. To follow the branch instead:
+`npm i "github:dhyabi2/tollstile-rail-nano#master"`.
 
 There is no `v0.4.0` tag yet; one will follow the merge of pull request #21. Do
 not install the existing `v0.3.2` tag: it predates the fixes in "Upgrading to
@@ -229,6 +233,13 @@ the fixed one.
   match the new shape.
 
 ## Install
+
+```
+npm i "github:dhyabi2/tollstile-rail-nano#93186495817c631cf05f0b6d21d2d545fd8d6b22"
+```
+
+This is the tested `0.4.0` commit. npm's registry still serves the older `0.3.1`;
+do not use `npm i tollstile-rail-nano` until `0.4.0` is published there.
 
 ```ts
 import { createTollstile, memoryLedger } from 'tollstile';
